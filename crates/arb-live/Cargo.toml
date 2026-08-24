@@ -1,0 +1,15 @@
+[package]
+name = "arb-live"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# HARD RULE 1 holds: no crates.io package is named here. HTTPS is reached by
+# invoking the system `curl` through std::process::Command, and JSON is parsed by
+# this crate's own reader. See src/http.rs for why curl rather than a hand-rolled
+# TLS stack, and src/json.rs for why a hand-rolled parser is correct here.
+[dependencies]
+arb-num = { path = "../arb-num" }
+arb-types = { path = "../arb-types" }
+arb-venue = { path = "../arb-venue" }

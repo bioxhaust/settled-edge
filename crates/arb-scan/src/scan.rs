@@ -45,7 +45,10 @@ use arb_math::{
     round_down_to_lot, slippage_bps, CarryLeg, LiquidationInputs, MathError,
 };
 use arb_num::{Bps, Money, Price, Qty, Rate, RoundMode};
-use arb_types::{ContractSize, ContractSpec, DataQuality, MarketKind, PositionSide, QualityFlags, Side, VenueKey};
+use arb_types::{
+    ContractSize, ContractSpec, DataQuality, MarketKind, PositionSide, Provenance, QualityFlags,
+    Side, VenueKey,
+};
 
 use crate::config::ScanConfig;
 use crate::error::{PairRefusal, ScanError};
@@ -339,7 +342,31 @@ fn assess_leg(
         blocked.push(Unrankable::PaintedDepth(vkey, paint.score));
     }
 
-    if !leg.quality().is_trustworthy() {
+    // Two checks, not one. This used to be a single `!is_trustworthy()`, which is
+    // `flags.is_empty() && provenance == LiveMeasured` — a conjunction that hid two
+    // unrelated verdicts behind one blocker, and whose flag term was far stricter
+    // than `QualityFlags::BLOCKING`. Any live leg carries `FEE_TIER_ASSUMED`, so
+    // under that gate no measured row could ever rank. Splitting it keeps every
+    // falsifying flag blocking while letting a stated, one-directional assumption
+    // ride on the row where the operator can see it.
+    //
+    // `q.flags` is the snapshots' own flags, unioned with the fee schedule's. It is
+    // a different set from the `flags` local above, which holds only what this
+    // function derived (staleness, skew, crossing, paint) and whose blockers were
+    // already pushed with their specific reasons. Nothing is double-counted: the
+    // derived flags are never written back into the snapshot's quality.
+    let q = leg.quality();
+    if q.flags.is_blocking() {
+        // Catches what has no dedicated check above: SEQ_GAP, BOOK_EMPTY,
+        // PRICE_UNAVAILABLE. The Bybit adapter really does set the last of these
+        // when a ticker arrives without a mark price, so this is a live path and
+        // not a defensive hypothetical.
+        blocked.push(Unrankable::BlockingFlags(
+            vkey,
+            q.flags.intersection(QualityFlags::BLOCKING),
+        ));
+    }
+    if q.provenance != Provenance::LiveMeasured {
         blocked.push(Unrankable::Unverified(vkey));
     }
 
@@ -876,8 +903,8 @@ mod tests {
     //
     // # Why these fixtures claim `DataQuality::MEASURED`
     //
-    // `assess_leg` pushes `Unrankable::Unverified` for any leg whose quality is
-    // not live-measured, and `Opportunity::is_rankable` is false while anything
+    // `assess_leg` pushes `Unrankable::Unverified` for any leg whose *market data*
+    // is not live-measured, and `Opportunity::is_rankable` is false while anything
     // is in `blocked`. So a `SYNTHESIZED` fixture — the honest mark for every
     // number in this repository, and what `arb_venue::FixtureAdapter` stamps —
     // *cannot* reach the end of the pipeline rankable. That is the guard working
@@ -908,6 +935,15 @@ mod tests {
     /// which is why supplying one matters: it makes the clock path *exercised*
     /// rather than defaulted.
     fn clean_book(vkey: VenueKey) -> BookSnapshot {
+        book_with_quality(vkey, DataQuality::MEASURED)
+    }
+
+    /// [`clean_book`]'s ladder under a different quality claim.
+    ///
+    /// Split out so a test that is about the *gate* changes exactly one thing —
+    /// what the snapshot says about itself — and the ladder stays the proven shape
+    /// documented above.
+    fn book_with_quality(vkey: VenueKey, quality: DataQuality) -> BookSnapshot {
         fn lvl(price: &str, qty: &str) -> Level {
             Level::new(
                 Price::parse(price).expect("price literal"),
@@ -934,7 +970,7 @@ mod tests {
             Some(1),
             Some(WallTs::EPOCH),
             LocalTs::EPOCH,
-            DataQuality::MEASURED,
+            quality,
         )
         .expect("book")
     }
@@ -1348,5 +1384,188 @@ mod tests {
         assert!(opp.is_rankable());
         assert_eq!(opp.net_apr.raw(), -38_700_000_000);
         assert!(opp.net_apr.is_negative());
+    }
+
+    // -- the leg gate: which caveats sink a row and which ride on it -------
+    //
+    // The tests below pin the gate that decides whether a *measured* row is
+    // allowed into the table at all, and they exist because that gate was wrong
+    // for most of this crate's life. It read:
+    //
+    //     if !leg.quality().is_trustworthy() { blocked.push(Unverified(vkey)) }
+    //
+    // and `is_trustworthy` is `flags.is_empty() && provenance == LiveMeasured`.
+    // An empty flag set is a far stricter demand than `QualityFlags::BLOCKING`,
+    // which deliberately excludes `FEE_TIER_ASSUMED`, `PARTIAL_BOOK` and
+    // `THIN_DEPTH`. Since no venue publishes which fee tier an account is on,
+    // every leg a public adapter can build carries `FEE_TIER_ASSUMED` — so the
+    // answer to "does this arbitrage pay" was "unverified", on every venue, at
+    // every size, for ever. The product did not work because of one conjunction.
+    //
+    // Splitting it into a flags check and a provenance check is the fix, and the
+    // risk it introduces is the obvious one: a blocking flag that arrives already
+    // set on an adapter's snapshot, and that `assess_leg` has no dedicated check
+    // for, must still block. `blocking_book` below is that case.
+
+    /// The same leg, with the fee schedule an honest public adapter produces.
+    ///
+    /// Rebuilt rather than parameterised so the clean pair above stays the
+    /// arithmetic baseline: the *only* difference between the two is which fee
+    /// tier claim is made, which is what these tests are about.
+    fn with_assumed_fees(leg: &LegInput) -> LegInput {
+        LegInput::with_carry_inputs(
+            leg.instrument,
+            leg.funding,
+            leg.book.clone(),
+            FeeSchedule::assumed(leg.fees.maker, leg.fees.taker),
+            DataQuality::new(
+                QualityFlags::FEE_TIER_ASSUMED,
+                Provenance::SynthesizedUnverified,
+            ),
+            leg.borrow,
+            leg.history.clone(),
+        )
+        .expect("changing the fee tier claim cannot make a valid leg invalid")
+    }
+
+    /// A measured book that says, in its own flags, that something about it is
+    /// broken.
+    ///
+    /// `PRICE_UNAVAILABLE` is not hypothetical: `arb_live`'s Bybit adapter sets it
+    /// when a ticker arrives without a mark price. It is in
+    /// `QualityFlags::BLOCKING` and it has no dedicated check in `assess_leg`, so
+    /// it is exactly the flag a careless split of the old gate would drop.
+    fn blocking_book(vkey: VenueKey, flag: QualityFlags) -> BookSnapshot {
+        book_with_quality(vkey, DataQuality::new(flag, Provenance::LiveMeasured))
+    }
+
+    /// An assumed fee tier does not sink a measured leg.
+    ///
+    /// This is the assertion the product rests on. The market data was measured
+    /// and says so; the cost model was assumed and says so, on a flag
+    /// `QualityFlags::BLOCKING` excludes. And the direction of the assumption is
+    /// what makes that safe: the worst published tier is charged, so a row that
+    /// clears the gate has been charged *at least* what it will really pay.
+    #[test]
+    fn an_assumed_fee_tier_flags_a_measured_leg_without_sinking_it() {
+        let (a, b) = clean_perp_pair();
+        let (a, b) = (with_assumed_fees(&a), with_assumed_fees(&b));
+
+        // The fee schedule is still honest about itself, unfolded.
+        assert_eq!(a.fee_provenance(), Provenance::SynthesizedUnverified);
+        // The leg is not: its market data came off a venue.
+        assert_eq!(a.quality().provenance, Provenance::LiveMeasured);
+        assert_eq!(a.quality().flags, QualityFlags::FEE_TIER_ASSUMED);
+        assert!(a.quality().is_rankable());
+        // Still not *trustworthy* — that gate wants a clean flag set, and reports
+        // are entitled to keep saying so. It is simply not the ranking gate.
+        assert!(!a.quality().is_trustworthy());
+
+        let opp = price_pair(&a, &b, &cfg_holding_for(ONE_YEAR_SECS)).expect("row");
+        assert!(
+            opp.blocked.is_empty(),
+            "an assumed fee tier must not block a measured row, got {:?}",
+            opp.blocked
+        );
+        assert!(opp.is_rankable());
+        // The caveat survives onto the row, where an operator reads it.
+        assert_eq!(opp.quality.flags, QualityFlags::FEE_TIER_ASSUMED);
+        assert_eq!(opp.quality.provenance, Provenance::LiveMeasured);
+
+        // And the number is the clean pair's number: this changed what the gate
+        // permits, not what the engine computes.
+        let (ca, cb) = clean_perp_pair();
+        let clean = price_pair(&ca, &cb, &cfg_holding_for(ONE_YEAR_SECS)).expect("row");
+        assert_eq!(opp.net_apr, clean.net_apr);
+        assert_eq!(opp.cost_bps, clean.cost_bps);
+    }
+
+    /// A blocking flag on the snapshot still blocks, even with the fee gate gone.
+    ///
+    /// Three flags in `QualityFlags::BLOCKING` — `SEQ_GAP`, `BOOK_EMPTY` and
+    /// `PRICE_UNAVAILABLE` — have no dedicated `Unrankable` variant, because they
+    /// are produced by adapters rather than derived by `assess_leg`. Before the
+    /// split they were caught by `is_trustworthy`'s `flags.is_empty()` term as a
+    /// side effect. This test is the reason the replacement is two checks and not
+    /// one: with a single provenance check, a book that told us its feed had
+    /// skipped a sequence number would have ranked.
+    #[test]
+    fn a_blocking_flag_on_a_measured_snapshot_still_sinks_the_row() {
+        for flag in [
+            QualityFlags::SEQ_GAP,
+            QualityFlags::BOOK_EMPTY,
+            QualityFlags::PRICE_UNAVAILABLE,
+        ] {
+            let (a, b) = clean_perp_pair();
+            let mexc = vkey_of(Venue::Mexc, MarketKind::LinearPerp);
+            let a = LegInput::with_carry_inputs(
+                a.instrument,
+                a.funding,
+                blocking_book(mexc, flag),
+                FeeSchedule::assumed(a.fees.maker, a.fees.taker),
+                DataQuality::new(
+                    QualityFlags::FEE_TIER_ASSUMED,
+                    Provenance::SynthesizedUnverified,
+                ),
+                None,
+                a.history.clone(),
+            )
+            .expect("leg");
+            let b = with_assumed_fees(&b);
+
+            let opp = price_pair(&a, &b, &cfg_holding_for(ONE_YEAR_SECS)).expect("row");
+            assert!(
+                !opp.is_rankable(),
+                "{flag} is in BLOCKING and must sink the row"
+            );
+            // Named, and named *precisely*: the payload carries the blocking
+            // subset only. Listing FEE_ASSUMED as a reason the row was sunk —
+            // when it explicitly is not one — would send the operator to buy an
+            // API key to fix a broken feed.
+            assert_eq!(
+                opp.blocked,
+                vec![Unrankable::BlockingFlags(mexc, flag)],
+                "expected exactly one blocker naming {flag}"
+            );
+            assert!(
+                !opp.blocked[0].to_string().contains("FEE_ASSUMED"),
+                "the reason must not name a non-blocking flag: {}",
+                opp.blocked[0]
+            );
+        }
+    }
+
+    /// Synthesized *market data* is still unverified, and still blocked.
+    ///
+    /// The safety property the split had to preserve. Every fixture in this
+    /// repository is `SYNTHESIZED`, `arb_venue::FixtureAdapter` stamps it, and a
+    /// replay must never be able to present an invented number as a ranked one.
+    /// The fee carve-out is narrow by construction: it applies to the fee schedule
+    /// alone, and the book and funding provenance still fold in as before.
+    #[test]
+    fn synthesized_market_data_is_still_unverified_however_good_the_fees_are() {
+        let mexc = vkey_of(Venue::Mexc, MarketKind::LinearPerp);
+        let (a, b) = clean_perp_pair();
+        // A *measured* fee schedule on a *synthesized* book. If the carve-out
+        // leaked in the other direction, this would rank.
+        let a = LegInput::with_carry_inputs(
+            a.instrument,
+            a.funding,
+            book_with_quality(mexc, DataQuality::SYNTHESIZED),
+            fees_taking("6"),
+            DataQuality::MEASURED,
+            None,
+            a.history.clone(),
+        )
+        .expect("leg");
+
+        assert_eq!(a.quality().provenance, Provenance::SynthesizedUnverified);
+        let opp = price_pair(&a, &b, &cfg_holding_for(ONE_YEAR_SECS)).expect("row");
+        assert!(!opp.is_rankable());
+        assert!(
+            opp.blocked.contains(&Unrankable::Unverified(mexc)),
+            "an invented book must be refused by name, got {:?}",
+            opp.blocked
+        );
     }
 }

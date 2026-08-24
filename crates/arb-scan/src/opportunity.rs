@@ -32,7 +32,7 @@ use core::fmt;
 
 use arb_detect::{ClockVerdict, Staleness};
 use arb_num::{Bps, Money, Price, Qty, Rate};
-use arb_types::{DataQuality, PositionSide, VenueKey};
+use arb_types::{DataQuality, PositionSide, QualityFlags, VenueKey};
 
 /// Why a row is present but not tradeable on its printed number.
 ///
@@ -82,9 +82,23 @@ pub enum Unrankable {
         /// What the book could actually fill.
         available: Qty,
     },
+    /// One leg carries a [`arb_types::QualityFlags::BLOCKING`] flag that no other
+    /// variant here has a dedicated check for — a sequence gap, an empty book, a
+    /// missing mark price. Those arrive already set on the adapter's snapshot
+    /// rather than being derived by `assess_leg`, so without this catch-all a
+    /// snapshot that told us it was broken would be ranked anyway.
+    ///
+    /// The payload is only the *blocking* subset, not the leg's whole flag set:
+    /// naming `FEE_ASSUMED` as a reason a row was sunk, when it is explicitly not
+    /// one, would send the operator to fix the wrong thing.
+    BlockingFlags(VenueKey, QualityFlags),
     /// Provenance is not a measurement. Always present in a fixture replay, and
     /// deliberately so: it is the marker that separates "the engine works" from
     /// "these numbers are real".
+    ///
+    /// This is about where the *market data* came from — book, ladder, funding
+    /// rate. An assumed fee tier does not reach here; see [`crate::LegInput::quality`]
+    /// for why that caveat rides on a flag instead.
     Unverified(VenueKey),
 }
 
@@ -119,6 +133,7 @@ impl fmt::Display for Unrankable {
                 "{} depth {available} < requested {requested}",
                 vkey.venue
             ),
+            Unrankable::BlockingFlags(v, flags) => write!(f, "{} {flags}", v.venue),
             Unrankable::Unverified(v) => write!(f, "{} data unverified", v.venue),
         }
     }

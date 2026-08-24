@@ -12,4 +12,5 @@ arb-math = { path = "../arb-math" }
 arb-book = { path = "../arb-book" }
 arb-detect = { path = "../arb-detect" }
 arb-venue = { path = "../arb-venue" }
+arb-live = { path = "../arb-live" }
 arb-scan = { path = "../arb-scan" }

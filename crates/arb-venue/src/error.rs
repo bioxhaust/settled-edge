@@ -139,6 +139,32 @@ pub enum VenueError {
     },
     /// Filesystem or transport failure, already rendered to text.
     Io(String),
+    /// A network request failed, with whether trying again could help.
+    ///
+    /// The variant this type's own comment anticipated. `retryable` is the
+    /// distinction a caller cannot reconstruct from the text: a 429 or a timeout
+    /// is worth another attempt in a moment, while a 400 naming an unknown
+    /// instrument will fail identically forever and retrying it only burns rate
+    /// limit that the retryable cases need.
+    ///
+    /// Kept separate from [`VenueError::Io`] because a fixture read and an HTTPS
+    /// GET fail for unrelated reasons and a caller that wants to back off must
+    /// not have to pattern-match on prose to tell them apart.
+    Transport {
+        /// Whether another attempt could plausibly succeed.
+        retryable: bool,
+        /// What went wrong, rendered.
+        detail: String,
+    },
+    /// A wire payload could not be read: malformed JSON, a field the adapter
+    /// requires that was absent, or a field whose shape changed.
+    ///
+    /// Never retryable, and that is the point of separating it from
+    /// [`VenueError::Transport`]. A venue that renamed `fundingRate` will keep
+    /// answering with the new name, so a retry loop would poll a broken endpoint
+    /// forever while the operator sees only "failed". Carries the detail because
+    /// the fix is always a code change and the field name is where it starts.
+    Wire(String),
     /// The request is well-formed but this adapter cannot answer it — funding
     /// on a spot instrument, depth 0, an order kind the venue does not offer.
     /// Distinct from `NotFound` because the caller's *question* is wrong, not
@@ -178,6 +204,15 @@ impl fmt::Display for VenueError {
             VenueError::NotFound => write!(f, "instrument not found"),
             VenueError::Parse { line, reason } => write!(f, "line {line}: {reason}"),
             VenueError::Io(m) => write!(f, "io: {m}"),
+            VenueError::Transport { retryable, detail } => {
+                let hint = if *retryable {
+                    "retryable"
+                } else {
+                    "not retryable"
+                };
+                write!(f, "transport ({hint}): {detail}")
+            }
+            VenueError::Wire(m) => write!(f, "wire payload: {m}"),
             VenueError::Unsupported(what) => write!(f, "unsupported: {what}"),
             VenueError::Type(e) => write!(f, "type: {e:?}"),
             VenueError::Arithmetic(e) => write!(f, "arithmetic: {e:?}"),

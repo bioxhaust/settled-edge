@@ -144,6 +144,21 @@ Same arithmetic, from `decisions/020`: going from all-taker (22 bp) to all-maker
 And `FEE_ASSUMED` is set on every row in the report right now. The most important
 multiplier in the economics is the one we have not measured. [fact, verified]
 
+**As of `decisions/026` the assumed tier no longer refuses the row.** It used to,
+through `assess_leg`'s `is_trustworthy()` gate, which meant no live row could ever
+rank on any venue — the assumption disabled the product rather than qualifying it.
+The tier now travels as `FEE_TIER_ASSUMED`, which `QualityFlags::BLOCKING`
+excludes, and the safety of that rests on one property: adapters must supply the
+venue's **worst published** tier, so the real fee can only be lower and `net_apr`
+can only be understated. An adapter that supplied an optimistic tier would turn
+this from a conservative caveat into manufactured edge. [fact, verified]
+
+**Consequence to close before execution exists:** a live leg with an assumed tier
+is now `is_tradeable() == true`. For a go/no-go that is the safe direction — we
+over-charge ourselves — but `is_tradeable()` must **not** be the last gate before
+an order is sent. By then the tier has to be measured through a read-only key.
+[open]
+
 ### A4. Capital efficiency is not in the ranking
 
 `[fact, verified]` Ranking is by net-of-costs APR. Two rows with identical APR
@@ -305,6 +320,18 @@ convention, and remains in `FIXTURES-UNVERIFIED.md` until measured.
   does not depend on `arb-math`; `arb-scan` bridges them. Two types for one
   concept can drift — a tier added on one side and not the other is a silent
   mismatch between the fee we quote and the fee we would be charged.
+- **E8.** There is an eleventh crate after all: `arb-live` `[fact, verified]`. It
+  holds the HTTPS transport, the clock seam and the per-venue adapters that turn
+  public endpoints into `arb-types` snapshots, and it exists because the brief's
+  ten crates had no home for I/O against a real exchange — `arb-venue` defines the
+  trait, and something has to implement it against a socket. Hard rule 1 is
+  satisfied without an HTTP crate by shelling out to `curl` with a fixed argument
+  list; `decisions/027` owes an account of that choice. The crate holds **no API
+  key, no secret and no request signing**, and there is no code path by which a
+  credential could reach it — asserted in its own module docs and by
+  `the_argument_list_never_weakens_tls`. **Open:** the fee-tier endpoint needs a
+  read-only credential, so the first signing code will land here or in a sibling,
+  and that is the moment the no-secrets property stops holding by construction.
 
 ---
 

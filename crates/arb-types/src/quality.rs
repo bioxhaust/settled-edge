@@ -188,6 +188,16 @@ impl QualityFlags {
         Self(self.0 | other.0)
     }
 
+    /// Set intersection.
+    ///
+    /// [`QualityFlags::intersects`] answers whether two sets overlap;
+    /// this answers *where*, which is what a report needs in order to name the
+    /// flags that sank a row instead of printing all of them.
+    #[inline]
+    pub const fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
     /// Add flags in place.
     #[inline]
     pub fn insert(&mut self, other: Self) {
@@ -391,6 +401,35 @@ mod tests {
         assert!(!QualityFlags::STALE.contains(both));
         assert!(QualityFlags::STALE.intersects(both));
         assert!(!QualityFlags::CLOCK_SKEW.intersects(QualityFlags::STALE));
+    }
+
+    /// `intersection` narrows a flag set to a named subset, which is what a
+    /// report needs in order to say *which* flag sank a row.
+    ///
+    /// The use that motivates it: `arb_scan` blocks a leg whose flags intersect
+    /// `BLOCKING`, and names the reason by intersecting with `BLOCKING` again.
+    /// Printing the leg's whole flag set instead would list `FEE_TIER_ASSUMED`
+    /// among the reasons a row was refused, when that flag is explicitly not one.
+    #[test]
+    fn intersection_narrows_to_the_named_subset() {
+        let mixed = QualityFlags::SEQ_GAP
+            .union(QualityFlags::FEE_TIER_ASSUMED)
+            .union(QualityFlags::PARTIAL_BOOK);
+        assert_eq!(
+            mixed.intersection(QualityFlags::BLOCKING),
+            QualityFlags::SEQ_GAP
+        );
+        // Disjoint sets meet nowhere, and an empty meet is not the same answer as
+        // "no flags were set" — the caller has to ask `intersects` for that.
+        assert!(QualityFlags::FEE_TIER_ASSUMED
+            .intersection(QualityFlags::BLOCKING)
+            .is_empty());
+        // Idempotent and commutative, since it is a bit-and underneath.
+        assert_eq!(mixed.intersection(mixed), mixed);
+        assert_eq!(
+            mixed.intersection(QualityFlags::BLOCKING),
+            QualityFlags::BLOCKING.intersection(mixed)
+        );
     }
 
     #[test]

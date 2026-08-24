@@ -14,7 +14,7 @@
 
 use arb_types::{
     BookSnapshot, BorrowSnapshot, DataQuality, FundingSnapshot, Instrument, InstrumentKey,
-    MarketKind, RateHistory, Venue, VenueKey,
+    MarketKind, Provenance, RateHistory, Venue, VenueKey,
 };
 use arb_venue::{ExchangeAdapter, FeeSchedule, VenueError};
 
@@ -236,14 +236,53 @@ impl LegInput {
 
     /// Quality of every input on this leg, folded together.
     ///
-    /// Book, funding (when present) and fees. [`DataQuality::combine`] unions the
-    /// flags and keeps the *worst* provenance, which is the whole point: a leg
-    /// whose book is measured and whose fee tier was invented is an invented leg.
+    /// Book and funding contribute **flags and provenance**. The fee schedule
+    /// contributes **flags only**, and that asymmetry is the most consequential
+    /// line in this file.
+    ///
+    /// # Why the fee schedule's provenance is deliberately not folded
+    ///
+    /// [`DataQuality::combine`] keeps the *worst* provenance. No public endpoint on
+    /// any venue reveals which fee tier an account is on, so an adapter that
+    /// fetched a real book, a real ladder, a real funding rate and a real contract
+    /// spec must still report the fee schedule as
+    /// [`Provenance::SynthesizedUnverified`]. Folding that in marked the entire leg
+    /// unverified, which sank every live row through
+    /// [`DataQuality::is_trustworthy`] and left the scanner unable to rank a single
+    /// thing it had actually measured.
+    ///
+    /// The two claims are not the same kind of claim:
+    ///
+    /// - `provenance` answers *where the market data came from*. Here: the venue.
+    /// - The fee is a **cost-model input**, and the assumption made about it is
+    ///   bounded and one-directional — adapters report the venue's worst published
+    ///   tier, so the real fee can only be lower and `net_apr` can only be
+    ///   understated. An assumption that can only make a row look worse than it is
+    ///   is not the same risk as a price that was never measured.
+    ///
+    /// The caveat is not discarded. It travels as
+    /// [`arb_types::QualityFlags::FEE_TIER_ASSUMED`], the flag that exists for
+    /// exactly this, which [`arb_types::QualityFlags::BLOCKING`] deliberately
+    /// excludes. The operator sees it on the row; the row is not silently deleted
+    /// for it.
+    ///
+    /// This is the only place in the workspace that folds a `DataQuality`
+    /// selectively. It is a decision about what *this* struct hands to `combine`,
+    /// not a weakening of `combine` — which still cannot launder a synthesized
+    /// provenance, and is still tested for it.
     pub fn quality(&self) -> DataQuality {
-        let mut q = self.book.quality.combine(self.fee_quality);
+        let mut q = self.book.quality.with_flags(self.fee_quality.flags);
         if let Some(f) = &self.funding {
             q = q.combine(f.quality);
         }
         q
+    }
+
+    /// Where the fee schedule came from, unfolded.
+    ///
+    /// [`LegInput::quality`] drops this on purpose; a caller that needs to report
+    /// the cost model's own standing — rather than the market data's — asks here.
+    pub const fn fee_provenance(&self) -> Provenance {
+        self.fee_quality.provenance
     }
 }

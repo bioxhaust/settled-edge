@@ -25,7 +25,10 @@
 //! between "this number is old" and "this number was never a measurement".
 //!
 //! In live operation `now` comes from the caller, the adapter stamps real
-//! observation times, and the same staleness code does real work.
+//! observation times, and the same staleness code does real work. That path is
+//! [`live`].
+
+pub mod live;
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -39,8 +42,9 @@ use arb_venue::{ExchangeAdapter, FixtureAdapter, VenueError};
 /// What can go wrong between a directory and a report.
 #[derive(Debug)]
 pub enum EngineError {
-    /// The fixtures could not be read or parsed. Fatal: a replay over an unknown
-    /// subset of the fixtures is not a replay.
+    /// An adapter failed: fixtures that could not be read or parsed on the replay
+    /// path, or a transport or payload failure on the live path. Fatal — a scan
+    /// over an unknown subset of the inputs is not a scan.
     Venue(VenueError),
     /// A leg could not be assembled, or the configuration is unusable.
     Scan(ScanError),
@@ -52,7 +56,12 @@ pub enum EngineError {
 impl core::fmt::Display for EngineError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            EngineError::Venue(e) => write!(f, "fixtures: {e}"),
+            // "venue", not "fixtures": this variant carries a failure from
+            // whichever adapter was in use, and on the `live` path that is an
+            // HTTPS request to a real exchange. Saying "fixtures: CONNECT tunnel
+            // failed" sends the operator to look at a directory of files when the
+            // problem is their network.
+            EngineError::Venue(e) => write!(f, "venue: {e}"),
             EngineError::Scan(e) => write!(f, "scan: {e}"),
             EngineError::NoPairs => f.write_str(
                 "no two instruments in this directory form a trade \

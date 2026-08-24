@@ -37,9 +37,19 @@ version = "0.1.0"
 dependencies = [
  "arb-book",
  "arb-detect",
+ "arb-live",
  "arb-math",
  "arb-num",
  "arb-scan",
+ "arb-types",
+ "arb-venue",
+]
+
+[[package]]
+name = "arb-live"
+version = "0.1.0"
+dependencies = [
+ "arb-num",
  "arb-types",
  "arb-venue",
 ]
