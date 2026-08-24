@@ -16,10 +16,18 @@ These are first in the file because they matter more than anything else in it.
 The round's stated edge is ~12 bps. Each item here is capable of exceeding that
 on its own, and none of them is modelled yet.
 
-### A1. Borrow cost on any short-spot leg — NOT MODELLED
+### A1. Borrow cost on any short-spot leg — TYPES EXIST, NOTHING MEASURED
 
-`[fact, verified]` `arb-math` models exchange fees and slippage. It does not
-model borrow.
+`[fact, verified]` As of `decisions/025` `arb-types` carries `BorrowSnapshot` and
+`BorrowInterval`: the accrual period travels with the rate, and a negative rate is
+refused at construction. `[fact, verified]` `arb-math` still does not consume
+them, no fixture carries a `[borrow]` section, and nothing annualises a borrow.
+
+`[fact, verified]` **`QualityFlags::BORROW_COST_UNKNOWN` exists, is in the
+`BLOCKING` set, and is raised by nothing.** A grep across every crate outside
+`arb-types` finds no producer; the only references are its own definition and its
+own tests. The vocabulary for admitting the gap was written before anything that
+could detect the gap, so the flag currently protects no row.
 
 `[assumption]` The classic cash-and-carry we rank (long spot, short perp) needs
 no borrow — you own the spot. But the *reverse* carry (short spot, long perp),
@@ -30,9 +38,27 @@ magnitude larger than 12 bps.
 
 **Consequence if wrong:** every negative-funding opportunity we surface is
 overstated, possibly to the point of sign inversion. **Until this is modelled,
-negative-funding rows must not be presented as actionable.** Whether the current
-`arb-scan` excludes them or merely ranks them lower is `[do not know]` pending
-the round's integration report.
+negative-funding rows must not be presented as actionable.**
+
+`[fact, verified]` The question this item used to leave open — whether `arb-scan`
+excludes such rows or merely ranks them lower — resolves to **neither**. `arb-scan`
+contains no reference to borrowing and no special handling of a negative funding
+rate, so a reverse-carry row is ranked beside the others with no borrow term in its
+cost and no mark saying one is missing. The saving grace is incidental rather than
+designed: `arb-engine`'s test `not_one_row_of_a_fixture_replay_is_rankable` shows
+every replay row blocked by `Unrankable::Unverified` — the invented provenance
+itself — and not by any cost-model gap. **That protection expires exactly when it
+is needed:** the day a measured feed replaces the fixtures, `Unverified` stops
+firing and the borrow term is still missing, so the first rankable table this
+project ever prints is also the first one that can rank a reverse carry on a cost
+it never charged.
+
+**Two things the new types deliberately do not model, so they stay open:**
+`[assumption]` **availability** — a rate is not inventory, and a borrow that
+cannot be opened is an absent opportunity rather than an expensive one; and
+`[assumption]` **rate variability** — margin rates move, on some venues with
+utilisation, so holding a week at today's quote is an assumption of the same kind
+as A5's.
 
 ### A2. Inter-venue transfer cost and latency — NOT MODELLED
 
@@ -75,7 +101,7 @@ tables are measured, the column is a lower bound on distance only for a
 single-tier isolated position. See decisions 016 (why `None` is a legitimate
 answer) and 017 (what is and is not modelled).
 
-### A5. Rate persistence is unmeasured, and it decides the outcome — NOT MODELLED
+### A5. Rate persistence is unmeasured, and it decides the outcome — TYPE EXISTS, NO DATA
 
 `periods_to_breakeven` is printed. **The probability that a funding divergence
 survives that many periods is not.** [do not know]
@@ -87,7 +113,17 @@ whether the strategy earns, and answering it needs a *history* of rates, not a
 snapshot. A snapshot says what will be paid in eight hours; it says nothing about
 three days from now.
 
-Until that history exists, every `net_apr` in the report is conditional on "if the
+`[fact, verified]` As of `decisions/025` `arb-types::RateHistory` can carry the
+series — settled rates only, strictly increasing in time, with `span()` and
+`current_sign_run()` reporting what is actually on record. It deliberately computes
+no probability: the verdict is `arb-detect`'s and the arithmetic is `arb-math`'s.
+`[fact, verified]` No fixture carries a `[history]` section, so every history in
+the workspace today is empty. `[fact, verified]` `QualityFlags::RATE_HISTORY_MISSING`
+is defined and, like `BORROW_COST_UNKNOWN`, **is raised by nothing** — so the
+obligation in the next sentence is currently unmet, not merely unverified. Every row
+*ought* to carry it; no row does.
+
+Until that data exists, every `net_apr` in the report is conditional on "if the
 rate does not move", and the report must say so rather than imply it. Worked
 through in `decisions/020`.
 
@@ -198,23 +234,27 @@ a decision already taken.
 - **D4.** Exchange timestamps are milliseconds. A venue emitting seconds or
   microseconds parsed as millis is a 1000x staleness error in the direction that
   makes stale data look fresh.
-- **D5.** Inverse perpetuals exist with quote-denominated contract sizes on some
+- **D6.** Inverse perpetuals exist with quote-denominated contract sizes on some
   venues in scope, and the per-venue contract size is unknown.
 
----
-
-### D5. The fixture format does not declare its own size unit
+### D5. The fixture format declares its size unit, but nothing cross-checks it
 
 An order book's ladder is denominated in base for linear and spot markets and in
-contracts for inverse ones (`decisions/019`). **No field in the fixture format says
-which**, so the unit is inferred from `ContractSize` and the convention survives
-only as a comment inside each file.
+contracts for inverse ones (`decisions/019`).
 
-That is an assertion about our carefulness, not about the data, and it is exactly
-what produced the units defect that decision records — a defect invisible on
-Binance, where one contract is one coin. The format should carry the unit
-explicitly, and the parser should refuse a file that does not state it.
-[assumption]
+`[fact, verified]` As of `decisions/024` the format **does** carry the unit: the
+parser requires `size_unit` and refuses a file without it with `MissingKey`, and
+all 16 fixtures declare one (15 `base`, 1 `contracts`).
+
+What stays open is the cross-check. `[fact, verified]` `ContractSpec::validate`
+deliberately does **not** require `size_unit` to agree with `SizeUnit::implied_by`,
+on the documented ground that disagreement is a real signal about the payload
+rather than an occasion to paper over it — so a self-contradictory fixture is still
+accepted, and nothing flags it. `[assumption]` Declared units are also still just
+our memory of an API: `size_unit = base` asserts our carefulness, not the venue's
+convention, and remains in `FIXTURES-UNVERIFIED.md` until measured.
+
+---
 
 ## E. Structural debt accepted for this round
 
