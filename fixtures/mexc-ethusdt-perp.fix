@@ -1,0 +1,55 @@
+!unverified invented-from-memory-not-checked-against-live-api
+# MEXC USDT-M perpetual, ETH_USDT. Invented from memory, never fetched.
+#
+# THIS IS THE PRICE_UNAVAILABLE CASE: mark and index are both ABSENT.
+# Both keys are optional, and their absence must raise
+# QualityFlags::PRICE_UNAVAILABLE rather than defaulting to zero or to the mid.
+#
+# Why it matters concretely: without an index there is no basis, and without a
+# mark there is no liquidation reference. A funding row computed from book mid
+# alone is a guess wearing a number's clothes. This fixture exists so that the
+# quality flag has to be honoured somewhere downstream.
+
+venue = mexc
+
+[instrument]
+base = ETH
+quote = USDT
+kind = linear_perp
+settle = USDT
+native = ETH_USDT
+# MEXC ETH_USDT contract multiplier recalled as 0.01 ETH.
+contract_size = base:0.01
+tick_size = 0.01
+lot_size = 0.01
+min_notional = 5
+
+[funding]
+# +0.027% per 8h -- the RICHEST ETH rate in the set (Bitget ETH is 0.00021).
+# It is deliberately paired with missing mark/index, so the top-ranked ETH row
+# is also the one with the least verifiable price. A scanner that sorts on rate
+# alone puts its worst-quality data first.
+rate = 0.00027
+interval_secs = 28800
+next_funding_at = 1735689600000
+# mark and index intentionally omitted -- see header.
+exchange_ts = 1735660800000
+interval_source = venue
+rate_source = predicted
+
+[fees]
+maker = 0.0002
+taker = 0.0006
+tier = unknown
+
+[book]
+sequence = 155231904
+exchange_ts = 1735660800100
+# mid = (3345.40 + 3345.55) / 2 = 3345.475
+# There is no mark to cross-check that against, which is the whole point.
+bid = 3345.40 x 14.00
+bid = 3345.33 x 29.50
+bid = 3345.26 x 61.00
+ask = 3345.55 x 10.20
+ask = 3345.62 x 36.00
+ask = 3345.70 x 74.50

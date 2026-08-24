@@ -1,0 +1,52 @@
+!unverified invented-from-memory-not-checked-against-live-api
+# Binance USD-M linear perpetual, ETHUSDT. Invented from memory, never fetched.
+#
+# Reference ETH snapshot; the other ETH perps are priced around this mid so the
+# ETH leg of the scanner has the same kind of dispersion the BTC leg has.
+
+venue = binance
+
+[instrument]
+base = ETH
+quote = USDT
+kind = linear_perp
+settle = USDT
+native = ETHUSDT
+contract_size = base:1
+# ETH is ~20x cheaper than BTC, so the tick is 100x finer than BTCUSDT's 0.1.
+# 0.01 / 3345 = 3.0e-8 = 0.0003 bp per tick.
+tick_size = 0.01
+lot_size = 0.001
+# 20 USDT: ETHUSDT's MIN_NOTIONAL is recalled as higher than BTCUSDT's 5.
+min_notional = 20
+
+[funding]
+# +0.012% per 8h.
+rate = 0.00012
+interval_secs = 28800
+next_funding_at = 1735689600000
+# mid = (3345.12 + 3345.20) / 2 = 3345.16
+# mark  3345.16 - 3345.16 = 0.00   -> 0.000 bp
+# index 3345.02 - 3345.16 = -0.14  -> -0.14 / 3345.16 = -4.185e-5 = -0.419 bp
+mark = 3345.16
+index = 3345.02
+exchange_ts = 1735660800000
+interval_source = venue
+rate_source = predicted
+
+[fees]
+maker = 0.0002
+taker = 0.00055
+tier = unknown
+
+[book]
+sequence = 887401233
+exchange_ts = 1735660800100
+# spread = 3345.20 - 3345.12 = 0.08 = 8 ticks
+# 0.08 / 3345.16 = 2.39e-5 = 0.239 bp -- tight, as ETHUSDT should be.
+bid = 3345.12 x 12.5
+bid = 3345.08 x 30.0
+bid = 3345.00 x 64.25
+ask = 3345.20 x 9.8
+ask = 3345.25 x 41.0
+ask = 3345.31 x 88.5

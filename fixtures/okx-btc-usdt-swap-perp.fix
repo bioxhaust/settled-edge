@@ -1,0 +1,61 @@
+!unverified invented-from-memory-not-checked-against-live-api
+# OKX linear swap, BTC-USDT-SWAP. Invented from memory, never fetched.
+#
+# THIS IS THE NEGATIVE-FUNDING CASE. Sign conventions differ across venues in
+# ways we have not verified; if OKX's sign is inverted relative to ours the
+# engine will pay funding while believing it collects it, and the error is the
+# FULL rate (here 0.5 bp per 8h = 55 bp APR), not a rounding difference.
+
+venue = okx
+
+[instrument]
+base = BTC
+quote = USDT
+kind = linear_perp
+settle = USDT
+native = BTC-USDT-SWAP
+# OKX ctVal for BTC-USDT-SWAP is recalled as 0.01 BTC per contract. This is the
+# most consequential unverified number in the file: if it is really 0.001 the
+# notional of every OKX leg is 10x wrong.
+contract_size = base:0.01
+tick_size = 0.1
+# lot_size is expressed in BASE units in every fixture (= ctVal * lotSz).
+# OKX's own lotSz field is in CONTRACTS. 0.01 base = 1 contract here.
+lot_size = 0.01
+# min_notional intentionally ABSENT: OKX does not publish a quote-notional
+# floor the way Binance does, and the field is optional. Exercises that path.
+
+[funding]
+# -0.005% per 8h: shorts pay longs. Coherent with the book below, where the
+# perp trades UNDER the index.
+rate = -0.00005
+interval_secs = 28800
+next_funding_at = 1735689600000
+# mid = (68118.5 + 68122.0) / 2 = 68120.25
+# mark  68120.3 - 68120.25 = +0.05 -> +0.007 bp
+# index 68121.0 - 68120.25 = +0.75 -> +0.110 bp
+# index ABOVE mark -> perp at a discount -> negative funding. Consistent.
+mark = 68120.3
+index = 68121.0
+exchange_ts = 1735660800000
+interval_source = venue
+rate_source = predicted
+
+[fees]
+# Lv1 / regular user: 0.02% maker, 0.05% taker from memory.
+maker = 0.0002
+taker = 0.0005
+tier = unknown
+
+[book]
+# OKX books carry seqId plus prevSeqId; we store seqId only.
+sequence = 3479201156
+exchange_ts = 1735660800100
+# Sizes are multiples of lot_size 0.01. OKX reports book size in CONTRACTS;
+# these are base units, so an adapter that forwards them unconverted is 100x out.
+bid = 68118.5 x 1.20
+bid = 68118.0 x 2.80
+bid = 68117.5 x 6.00
+ask = 68122.0 x 0.90
+ask = 68122.5 x 3.40
+ask = 68123.0 x 7.10

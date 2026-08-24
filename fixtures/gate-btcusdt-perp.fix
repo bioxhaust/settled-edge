@@ -1,0 +1,56 @@
+!unverified invented-from-memory-not-checked-against-live-api
+# Gate.io USDT-settled perpetual, BTC_USDT. Invented from memory, never fetched.
+#
+# THIS IS THE interval_source = assumed CASE. We did NOT read a funding interval
+# from Gate; 28800 s is a default copied from the other seven venues. If Gate
+# settles every 4h the APR from this rate is 2x too low; if 1h, 8x too low, and
+# this row sorts to the top of the table for a reason that does not exist.
+
+venue = gate
+
+[instrument]
+base = BTC
+quote = USDT
+kind = linear_perp
+settle = USDT
+native = BTC_USDT
+# Gate calls this quanto_multiplier; recalled as 0.0001 BTC for BTC_USDT.
+# Same symbol string as MEXC but a separate, independently unverified value.
+contract_size = base:0.0001
+tick_size = 0.1
+lot_size = 0.0001
+min_notional = 5
+
+[funding]
+# +0.015% per 8h.
+rate = 0.00015
+interval_secs = 28800
+next_funding_at = 1735689600000
+# mid = (68120.8 + 68124.2) / 2 = 68122.5
+# mark  68122.5 - 68122.5 = 0.0   -> 0.000 bp (mark exactly at mid)
+# index 68121.6 - 68122.5 = -0.9  -> -0.132 bp
+mark = 68122.5
+index = 68121.6
+exchange_ts = 1735660800000
+# The one value in this set we admit we guessed rather than recalled.
+interval_source = assumed
+rate_source = predicted
+
+[fees]
+# 0.015% maker / 0.05% taker from memory -- Gate is recalled as the cheapest
+# maker of the eight. If that is wrong we are OVERSTATING edge on this venue,
+# which is the dangerous direction. Verify before sizing anything here.
+maker = 0.00015
+taker = 0.0005
+tier = unknown
+
+[book]
+# Gate order-book updates carry a large monotonic `u`; magnitude ~10^10.
+sequence = 20489117733
+exchange_ts = 1735660800100
+bid = 68120.8 x 1.1000
+bid = 68120.3 x 3.2000
+bid = 68119.8 x 5.5000
+ask = 68124.2 x 0.9500
+ask = 68124.7 x 2.7000
+ask = 68125.2 x 6.8000

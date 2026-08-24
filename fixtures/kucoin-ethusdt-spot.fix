@@ -1,0 +1,56 @@
+!unverified invented-from-memory-not-checked-against-live-api
+# KuCoin SPOT, ETH-USDT. Invented from memory, never fetched.
+#
+# NO [funding] SECTION -- spot pays none. See binance-btcusdt-spot.fix.
+#
+# Second spot book, deliberately on a DIFFERENT venue and a DIFFERENT asset from
+# the first, so spot-perp pairing has to match on (base, quote) across venues
+# rather than getting away with same-venue string equality.
+#
+# KuCoin spot uses a HYPHEN (ETH-USDT) where KuCoin futures does not (ETHUSDTM).
+# One venue, two symbol grammars, and the spot/futures REST hosts differ too.
+# An adapter that derives one symbol from the other will be wrong on this venue.
+#
+# Cash leg for the ETH perps:
+#   spot mid = (3344.62 + 3344.98) / 2 = 3344.80
+#   binance ETH perp mid = 3345.16
+#   basis = 3345.16 - 3344.80 = 0.36 USDT
+#   1 bp of 3344.80 = 0.334480, so 0.36 / 3344.80 = 1.076e-4 = 1.08 bp premium.
+# Smaller premium than BTC's 3.93 bp. Both are small because both books are near
+# flat; nothing here should be read as a signal about ETH vs BTC basis.
+
+venue = kucoin
+
+[instrument]
+base = ETH
+quote = USDT
+kind = spot
+settle = USDT
+native = ETH-USDT
+contract_size = base:1
+tick_size = 0.01
+lot_size = 0.0001
+# KuCoin's spot minimum is recalled as tiny -- fractions of a dollar, unlike
+# Binance's 5 USDT floor. If wrong in the low direction we submit dust orders
+# that get rejected; if wrong in the high direction we refuse valid small legs.
+min_notional = 0.1
+
+[fees]
+# 0.1% / 0.1% base spot schedule. Same 5x-the-perp-fee problem as Binance spot.
+maker = 0.001
+taker = 0.001
+tier = unknown
+
+[book]
+sequence = 1745300998
+exchange_ts = 1735660800100
+# spread = 3344.98 - 3344.62 = 0.36 USDT = 36 ticks
+# 0.36 / 3344.80 = 1.08 bp -- wider than Binance perp ETH (0.239 bp), which is
+# what a smaller spot venue should look like.
+# Sizes are multiples of lot_size 0.0001, written to 4 dp.
+bid = 3344.62 x 4.5000
+bid = 3344.55 x 11.2000
+bid = 3344.41 x 26.8000
+ask = 3344.98 x 3.8000
+ask = 3345.11 x 14.6000
+ask = 3345.30 x 31.0000

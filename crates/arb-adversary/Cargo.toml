@@ -1,0 +1,38 @@
+[package]
+name = "arb-adversary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Owner: Engineer 7, correctness adversary. See decisions/008.
+# Contains no product code. Nothing depends on this crate.
+# Depends on every crate it audits, through public API only.
+#
+# History of this list, because the reason a dependency is absent matters as much
+# as the reason one is present:
+#
+#   arb-venue: was removed in an earlier pass because it did not compile, and a
+#   dependency that does not build makes `cargo test -p arb-adversary` fail at
+#   link time, which hides every finding in this crate behind an error that is
+#   not ours. It compiles clean now, so it is back — the fixture adapter is the
+#   only source of a real `LocalTs::EPOCH` snapshot, and `staleness.rs` cannot
+#   test the fixture staleness path without it.
+#
+#   arb-scan: was absent while it was still being written, on the same argument as
+#   above. It compiles and passes its own tests now, so it is back. It is the
+#   crate that most needs an adversary: it is the one that is sold, and it is
+#   where a units error hid until `decisions/019`.
+#
+#   arb-engine: deliberately absent. It is the binary and the report; auditing a
+#   report's formatting is not this crate's job, and the invariants worth pinning
+#   there are already pinned by arb-engine's own tests, which run the real
+#   fixtures through the real scanner.
+[dependencies]
+arb-num = { path = "../arb-num" }
+arb-types = { path = "../arb-types" }
+arb-math = { path = "../arb-math" }
+arb-book = { path = "../arb-book" }
+arb-detect = { path = "../arb-detect" }
+arb-venue = { path = "../arb-venue" }
+arb-scan = { path = "../arb-scan" }

@@ -1,0 +1,45 @@
+!unverified invented-from-memory-not-checked-against-live-api
+# Bitget USDT-M perpetual, ETHUSDT_UMCBL. Invented from memory, never fetched.
+#
+# THIS IS THE FUNDING-ONLY FIXTURE: there is NO [book] section.
+# A funding-rate REST poll and a book subscription are separate calls on every
+# venue, and the funding call is the one that succeeds when the websocket is
+# down. The engine must be able to rank carry with no depth at all -- and must
+# NOT then claim it can execute. If a size comes out of this fixture, that is a
+# bug: the depth to support it does not exist here.
+
+venue = bitget
+
+[instrument]
+base = ETH
+quote = USDT
+kind = linear_perp
+settle = USDT
+native = ETHUSDT_UMCBL
+contract_size = base:1
+tick_size = 0.01
+lot_size = 0.01
+min_notional = 5
+
+[funding]
+# +0.021% per 8h -- the richest ETH rate in the set.
+# Against OKX ETH at -0.00002 the full ETH spread is
+#   0.00021 - (-0.00002) = 0.00023 = 2.3 bp per 8h
+#                        = 2.3 * 3 * 365 = 2519 bp APR = 25.2% APR gross.
+rate = 0.00021
+interval_secs = 28800
+next_funding_at = 1735689600000
+# No book here, so there is no mid to reconcile against. mark/index are still
+# present and are the ONLY price reference this fixture offers -- which is
+# precisely why an engine must not silently substitute mark for a tradeable bid.
+# Both sit inside the range the other ETH fixtures' books span (3344.79-3345.52).
+mark = 3345.30
+index = 3345.10
+exchange_ts = 1735660800000
+interval_source = venue
+rate_source = predicted
+
+[fees]
+maker = 0.0002
+taker = 0.0006
+tier = unknown

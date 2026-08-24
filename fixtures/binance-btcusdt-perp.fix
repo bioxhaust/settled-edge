@@ -1,0 +1,65 @@
+!unverified invented-from-memory-not-checked-against-live-api
+# Binance USD-M linear perpetual, BTCUSDT.
+# EVERY number below was written from memory of the API shape. None of it was
+# fetched. Treat as a shape exercise for the parser, never as market data.
+#
+# This file is the reference snapshot: the other BTC perps are priced around it
+# so the scanner sees a realistic cross-venue dispersion instead of a flat book.
+
+venue = binance
+
+[instrument]
+base = BTC
+quote = USDT
+kind = linear_perp
+settle = USDT
+native = BTCUSDT
+# base:1 -> one "contract" is one BTC. Binance USD-M quotes size directly in
+# base units, so there is no contract multiplier to get wrong here.
+contract_size = base:1
+tick_size = 0.1
+lot_size = 0.001
+# 5 USDT: recalled from the MIN_NOTIONAL filter on USD-M pairs. If the real
+# floor is higher, small legs get rejected at submit time, not here.
+min_notional = 5
+
+[funding]
+# +0.01% per 8h == the funding cap-neutral resting value most venues idle at.
+# Chosen as the baseline the other venues deviate from.
+rate = 0.0001
+interval_secs = 28800
+# 1735689600000 ms = 2025-01-01T00:00:00Z (1735689600 / 86400 = 20088 exactly,
+# and epoch day 20088 is 2025-01-01), i.e. a real 00:00 UTC funding boundary.
+next_funding_at = 1735689600000
+# mark/index sit either side of the book mid:
+#   mid = (68120.0 + 68123.5) / 2 = 68121.75
+#   mark 68121.8 - 68121.75 = +0.05  -> +0.007 bp
+#   index 68120.9 - 68121.75 = -0.85 -> -0.125 bp
+# mark above index is consistent with the positive funding rate above.
+mark = 68121.8
+index = 68120.9
+# exchange_ts = next_funding_at - interval_secs*1000 = 2024-12-31T16:00:00Z,
+# i.e. exactly one interval before settlement.
+exchange_ts = 1735660800000
+interval_source = venue
+rate_source = predicted
+
+[fees]
+# VIP 0 USD-M spot-of-memory: 0.02% maker / 0.055% taker (the 0.055% is the
+# post-BNB-discount-free number). tier = unknown so the engine assumes the
+# WORST tier it knows -- never quote ourselves a fee we cannot prove we get.
+maker = 0.0002
+taker = 0.00055
+tier = unknown
+
+[book]
+# Binance depth streams carry a lastUpdateId; 12345 is a placeholder magnitude,
+# the real values are ~10^10 on BTCUSDT.
+sequence = 12345
+exchange_ts = 1735660800100
+bid = 68120.0 x 1.5
+bid = 68119.5 x 3.0
+bid = 68119.0 x 5.25
+ask = 68123.5 x 1.2
+ask = 68124.0 x 4.0
+ask = 68124.5 x 6.5

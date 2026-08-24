@@ -1,0 +1,56 @@
+!unverified invented-from-memory-not-checked-against-live-api
+# Bybit v5 linear perpetual, BTCUSDT. Invented from memory, never fetched.
+#
+# Priced ~1.25 USDT above the Binance snapshot (68123.0 vs 68121.75 mid,
+# = +0.18 bp) and carrying a richer funding rate, so the pair binance/bybit is
+# the obvious first row for a funding-spread scanner.
+
+venue = bybit
+
+[instrument]
+base = BTC
+quote = USDT
+kind = linear_perp
+settle = USDT
+native = BTCUSDT
+contract_size = base:1
+tick_size = 0.1
+lot_size = 0.001
+min_notional = 5
+
+[funding]
+# +0.025% per 8h. Deliberately 2.5x the Binance baseline: the whole point of
+# the fixture set is that the rates DIFFER, so ranking has something to sort.
+# Spread vs Binance = 0.00025 - 0.0001 = 0.00015 = 1.5 bp per 8h
+#                   = 1.5 * 3 * 365 = 1642 bp APR = 16.4% APR gross.
+rate = 0.00025
+interval_secs = 28800
+next_funding_at = 1735689600000
+# mid = (68121.5 + 68124.5) / 2 = 68123.0
+# mark  68123.1 - 68123.0 = +0.1  -> +0.015 bp
+# index 68120.7 - 68123.0 = -2.3  -> -0.338 bp
+# Perp above index by 2.4 -> richer funding than Binance. Internally coherent.
+mark = 68123.1
+index = 68120.7
+exchange_ts = 1735660800000
+interval_source = venue
+rate_source = predicted
+
+[fees]
+# Non-VIP linear: 0.02% / 0.055% from memory. Same worst-tier posture.
+maker = 0.0002
+taker = 0.00055
+tier = unknown
+
+[book]
+# Bybit orderbook messages carry both `u` (update id) and `seq`. We record one
+# integer; which of the two the adapter should use is UNRESOLVED (see
+# FIXTURES-UNVERIFIED.md) and picking the wrong one breaks gap detection.
+sequence = 4587123
+exchange_ts = 1735660800100
+bid = 68121.5 x 2.1
+bid = 68121.0 x 4.4
+bid = 68120.5 x 7.8
+ask = 68124.5 x 1.9
+ask = 68125.0 x 3.3
+ask = 68125.5 x 8.2

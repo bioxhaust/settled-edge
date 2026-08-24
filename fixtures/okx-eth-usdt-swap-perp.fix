@@ -1,0 +1,56 @@
+!unverified invented-from-memory-not-checked-against-live-api
+# OKX linear swap, ETH-USDT-SWAP. Invented from memory, never fetched.
+#
+# Second negative-funding file. Both OKX perps in this set trade at a discount
+# to index, which is internally coherent (one venue, one skew) but is ALSO
+# exactly what a sign-convention bug in the OKX adapter would look like. If OKX
+# rows come out uniformly negative against live data, suspect the sign before
+# believing the market.
+
+venue = okx
+
+[instrument]
+base = ETH
+quote = USDT
+kind = linear_perp
+settle = USDT
+native = ETH-USDT-SWAP
+# OKX ctVal for ETH-USDT-SWAP recalled as 0.1 ETH per contract -- 10x the BTC
+# swap's 0.01. The two are independent memories; neither is verified.
+contract_size = base:0.1
+tick_size = 0.01
+# BASE units (= ctVal * lotSz of 1 contract).
+lot_size = 0.1
+
+[funding]
+# -0.002% per 8h: the smallest-magnitude rate in the set, and negative.
+# Small enough that a rounding bug in Rate::parse would change its sign, which
+# is the point of including it.
+rate = -0.00002
+interval_secs = 28800
+next_funding_at = 1735689600000
+# mid = (3344.90 + 3345.02) / 2 = 3344.96
+# mark  3344.96 - 3344.96 = 0.00  -> 0.000 bp
+# index 3345.10 - 3344.96 = +0.14 -> +0.14 / 3344.96 = +4.185e-5 = +0.419 bp
+# index ABOVE mark -> perp at a discount -> negative funding. Consistent.
+mark = 3344.96
+index = 3345.10
+exchange_ts = 1735660800000
+interval_source = venue
+rate_source = predicted
+
+[fees]
+maker = 0.0002
+taker = 0.0005
+tier = unknown
+
+[book]
+sequence = 3479204871
+exchange_ts = 1735660800100
+# Sizes are multiples of lot_size 0.1, i.e. whole contracts.
+bid = 3344.90 x 20.0
+bid = 3344.85 x 45.0
+bid = 3344.79 x 90.0
+ask = 3345.02 x 18.0
+ask = 3345.08 x 52.0
+ask = 3345.15 x 110.0

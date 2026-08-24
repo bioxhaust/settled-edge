@@ -1,0 +1,78 @@
+!unverified invented-from-memory-not-checked-against-live-api
+# OKX INVERSE (coin-margined) swap, BTC-USD-SWAP. Invented, never fetched.
+#
+# ============================================================================
+# THIS IS THE FILE WHERE THE 68,000x NOTIONAL ERROR LIVES.
+#
+# contract_size = quote:100 -- one contract is 100 US DOLLARS of exposure, and
+# settle = BTC -- margin and PnL are denominated in BITCOIN, not USDT.
+#
+# If this is parsed as base:100 the engine believes one contract is 100 BTC.
+# At the price below that is 100 * 68119.75 / 100 = 68,119.75x the true notional.
+# Round it and you get the 68,000x figure: a 250-contract top-of-book bid
+# (25,000 USD, ~0.367 BTC) would be read as 25,000 BTC, ~1.7 billion USD.
+#
+# ContractSpec::new is expected to REJECT a quote-per-contract declaration on a
+# linear/spot market and a base-per-contract declaration on an inverse one.
+# That rejection at parse time is the entire defence. Do not weaken it.
+# ============================================================================
+
+venue = okx
+
+[instrument]
+base = BTC
+quote = USD
+kind = inverse_perp
+# Settled in the BASE asset. This is what makes it inverse: PnL is non-linear
+# in price and every size is a dollar amount, not a coin amount.
+settle = BTC
+native = BTC-USD-SWAP
+# OKX ctVal for BTC-USD-SWAP recalled as 100 USD (Bybit/Binance inverse BTC is
+# recalled as 1 USD per contract instead -- see FIXTURES-UNVERIFIED.md; the two
+# conventions differ by exactly 100x and both are unverified).
+contract_size = quote:100
+tick_size = 0.1
+# lot_size in CONTRACTS here, not base units: on an inverse book the natural
+# size unit IS the contract. This is a different convention from the linear
+# fixtures and is called out in FIXTURES-UNVERIFIED.md as unresolved.
+lot_size = 1
+# One contract = 100 USD, so the floor is one contract's worth.
+min_notional = 100
+
+[funding]
+# +0.01% per 8h.
+rate = 0.0001
+interval_secs = 28800
+next_funding_at = 1735689600000
+# mid = (68118.0 + 68121.5) / 2 = 68119.75
+# mark  68119.8 - 68119.75 = +0.05 -> +0.007 bp
+# index 68118.9 - 68119.75 = -0.85 -> -0.125 bp
+# NOTE the index here is a BTC/USD index, not BTC/USDT. It is ~2 USD below the
+# linear fixtures' index because USDT is recalled as trading slightly above 1.00
+# USD. That basis is a guess; if USDT is at a discount the sign flips.
+mark = 68119.8
+index = 68118.9
+exchange_ts = 1735660800000
+interval_source = venue
+rate_source = predicted
+
+[fees]
+# Inverse-swap fees are recalled as the same 0.02%/0.05% schedule as linear,
+# but charged IN BTC. A fee taken in the base asset is not the same risk as one
+# taken in quote; if the engine books it as quote the hedge drifts.
+maker = 0.0002
+taker = 0.0005
+tier = unknown
+
+[book]
+sequence = 3479203042
+exchange_ts = 1735660800100
+# Sizes are CONTRACTS (integers, multiples of lot_size 1).
+#   250 contracts * 100 USD = 25,000 USD = 0.36700 BTC at 68119.75
+# Inverse books are deep in dollar terms and shallow in coin terms.
+bid = 68118.0 x 250
+bid = 68117.5 x 640
+bid = 68117.0 x 1200
+ask = 68121.5 x 180
+ask = 68122.0 x 720
+ask = 68122.5 x 1500

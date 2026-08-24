@@ -1,0 +1,53 @@
+!unverified invented-from-memory-not-checked-against-live-api
+# Bitget USDT-M perpetual, BTCUSDT_UMCBL. Invented from memory, never fetched.
+#
+# The _UMCBL suffix is a v1-API product-type marker (UMCBL = USDT-margined
+# perpetual). Bitget's v2 API dropped it in favour of a separate productType
+# parameter. We do not know which convention this engine will talk to; if it is
+# v2 then this native symbol 404s on every request.
+
+venue = bitget
+
+[instrument]
+base = BTC
+quote = USDT
+kind = linear_perp
+settle = USDT
+native = BTCUSDT_UMCBL
+contract_size = base:1
+tick_size = 0.1
+lot_size = 0.001
+min_notional = 5
+
+[funding]
+# +0.018% per 8h. Sits between Binance (0.0001) and Bybit (0.00025) so the
+# ranking has an interior point, not just extremes.
+rate = 0.00018
+interval_secs = 28800
+next_funding_at = 1735689600000
+# mid = (68120.5 + 68124.0) / 2 = 68122.25
+# mark  68122.3 - 68122.25 = +0.05 -> +0.007 bp
+# index 68121.4 - 68122.25 = -0.85 -> -0.125 bp
+mark = 68122.3
+index = 68121.4
+exchange_ts = 1735660800000
+interval_source = venue
+rate_source = predicted
+
+[fees]
+# 0.02% maker / 0.06% taker from memory. Bitget's taker is recalled as the
+# worst of the majors; if that memory is inverted we are UNDERSTATING our edge,
+# which is the safe direction to be wrong in.
+maker = 0.0002
+taker = 0.0006
+tier = unknown
+
+[book]
+sequence = 771044219
+exchange_ts = 1735660800100
+bid = 68120.5 x 1.35
+bid = 68120.0 x 2.60
+bid = 68119.5 x 4.90
+ask = 68124.0 x 1.05
+ask = 68124.5 x 2.95
+ask = 68125.0 x 6.20

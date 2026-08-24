@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/arb-num",
+    "crates/arb-types",
+    "crates/arb-math",
+    "crates/arb-book",
+    "crates/arb-detect",
+    "crates/arb-venue",
+    "crates/arb-scan",
+    "crates/arb-private",
+    "crates/arb-engine",
+    "crates/arb-adversary",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+publish = false
+
+# HARD RULE 1: zero external dependencies. There is no [dependencies] section
+# anywhere in this workspace that names a crates.io package. Intra-workspace
+# path dependencies only. `cargo build --offline --workspace` must pass.

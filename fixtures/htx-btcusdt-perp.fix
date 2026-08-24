@@ -1,0 +1,57 @@
+!unverified invented-from-memory-not-checked-against-live-api
+# HTX (ex-Huobi) linear swap, BTC-USDT. Invented from memory, never fetched.
+#
+# THIS IS THE DELIBERATELY THIN BOOK: two levels per side, sizes ~0.04 BTC at
+# top, and a spread of 8.0 USDT.
+#   spread = 68126.0 - 68118.0 = 8.0
+#   8.0 / 68122.0 = 1.1743e-4 = 11.74 bp
+# That is 11.74 bp of spread against a 12 bp edge. Any sizing model that ignores
+# depth will report this venue as tradeable and it is not: crossing the spread
+# alone eats 97% of the edge before fees. This file exists so that behaviour
+# shows up in a table rather than in production.
+
+venue = htx
+
+[instrument]
+base = BTC
+quote = USDT
+kind = linear_perp
+settle = USDT
+native = BTC-USDT
+# HTX linear swap contract_size recalled as 0.001 BTC for BTC-USDT.
+contract_size = base:0.001
+tick_size = 0.1
+lot_size = 0.001
+
+[funding]
+# +0.006% per 8h -- the lowest positive rate in the set. Paired with the worst
+# liquidity on purpose: cheap carry you cannot actually enter.
+rate = 0.00006
+interval_secs = 28800
+next_funding_at = 1735689600000
+# mid = (68118.0 + 68126.0) / 2 = 68122.0
+# mark  68122.0 - 68122.0 = 0.0  -> 0.000 bp
+# index 68121.5 - 68122.0 = -0.5 -> -0.073 bp
+# With a spread this wide the mid is a weak estimator; mark is the better
+# reference here, which is itself an argument for not trusting mid on thin books.
+mark = 68122.0
+index = 68121.5
+exchange_ts = 1735660800000
+interval_source = venue
+rate_source = predicted
+
+[fees]
+# 0.02% maker / 0.05% taker from memory.
+maker = 0.0002
+taker = 0.0005
+tier = unknown
+
+[book]
+sequence = 176610348
+exchange_ts = 1735660800100
+# Note the 1.5 and 2.5 USDT gaps between levels -- 15x and 25x the tick. Real
+# thinness is gappy, not just small.
+bid = 68118.0 x 0.045
+bid = 68116.5 x 0.120
+ask = 68126.0 x 0.038
+ask = 68128.5 x 0.150

@@ -1,0 +1,57 @@
+!unverified invented-from-memory-not-checked-against-live-api
+# KuCoin Futures linear perpetual. Invented from memory, never fetched.
+#
+# NATIVE SYMBOL DISAGREEMENT -- read this before using the file.
+# KuCoin is recalled as using XBT, not BTC, for bitcoin, giving XBTUSDTM. The
+# fixture brief suggested BTCUSDTM. Both are unverified. XBTUSDTM is recorded
+# below because it is the stronger memory, and this comment exists so the
+# disagreement is visible rather than silently resolved. If the memory is wrong,
+# every KuCoin request 404s -- a loud failure, not a silent mispricing, which is
+# why this guess is acceptable to ship unverified.
+
+venue = kucoin
+
+[instrument]
+base = BTC
+quote = USDT
+kind = linear_perp
+settle = USDT
+native = XBTUSDTM
+# KuCoin `multiplier` for XBTUSDTM recalled as 0.001 BTC per contract.
+contract_size = base:0.001
+tick_size = 0.1
+# BASE units (= multiplier * 1 contract). KuCoin's lotSize field is in contracts.
+lot_size = 0.001
+# min_notional ABSENT: KuCoin gates on minimum 1 contract, not a quote notional.
+
+[funding]
+# +0.008% per 8h -- second-lowest positive rate in the set.
+rate = 0.00008
+interval_secs = 28800
+next_funding_at = 1735689600000
+# mid = (68119.4 + 68123.1) / 2 = 68121.25
+# mark  68121.3 - 68121.25 = +0.05 -> +0.007 bp
+# index 68121.0 - 68121.25 = -0.25 -> -0.037 bp
+# Smallest premium of the positive-funding venues, matching the small rate.
+mark = 68121.3
+index = 68121.0
+exchange_ts = 1735660800000
+interval_source = venue
+rate_source = predicted
+
+[fees]
+# 0.02% maker / 0.06% taker from memory.
+maker = 0.0002
+taker = 0.0006
+tier = unknown
+
+[book]
+# KuCoin level2 carries a monotonic `sequence`; magnitude here is a placeholder.
+sequence = 1745300112
+exchange_ts = 1735660800100
+bid = 68119.4 x 1.250
+bid = 68118.9 x 2.400
+bid = 68118.4 x 4.100
+ask = 68123.1 x 1.100
+ask = 68123.6 x 3.200
+ask = 68124.1 x 5.900

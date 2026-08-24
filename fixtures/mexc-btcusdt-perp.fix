@@ -1,0 +1,60 @@
+!unverified invented-from-memory-not-checked-against-live-api
+# MEXC USDT-M perpetual, BTC_USDT. Invented from memory, never fetched.
+#
+# THIS IS THE rate_source = historical CASE. The rate below is the LAST SETTLED
+# rate, not a forecast of the next one. Ranking a settled rate as if it were
+# predicted is a one-interval lag: on a mean-reverting rate that inverts the
+# sign of the carry roughly as often as it confirms it.
+
+venue = mexc
+
+[instrument]
+base = BTC
+quote = USDT
+kind = linear_perp
+settle = USDT
+native = BTC_USDT
+# MEXC futures contract multiplier for BTC_USDT is recalled as 0.0001 BTC.
+# That is 4 orders of magnitude away from base:1; if this is wrong, MEXC
+# notionals are wrong by 10^4 and the venue will dominate every ranking table
+# for the wrong reason.
+contract_size = base:0.0001
+tick_size = 0.1
+# BASE units, = ctVal * 1 contract.
+lot_size = 0.0001
+min_notional = 5
+
+[funding]
+# +0.03% per 8h, the richest rate in the set. Deliberately the top of the table
+# AND flagged historical, so a scanner that ignores rate_source will surface a
+# stale number as its best opportunity -- exactly the failure we want visible.
+rate = 0.0003
+interval_secs = 28800
+next_funding_at = 1735689600000
+# mid = (68122.0 + 68125.5) / 2 = 68123.75
+# mark  68123.8 - 68123.75 = +0.05 -> +0.007 bp
+# index 68121.2 - 68123.75 = -2.55 -> -0.374 bp
+# Largest premium in the set, coherent with the richest funding rate.
+mark = 68123.8
+index = 68121.2
+exchange_ts = 1735660800000
+interval_source = venue
+rate_source = historical
+
+[fees]
+# 0.02% / 0.06%. MEXC has run zero-maker-fee futures promotions; if one is live
+# our maker fee is OVERSTATED, which understates edge -- safe direction.
+maker = 0.0002
+taker = 0.0006
+tier = unknown
+
+[book]
+sequence = 155230877
+exchange_ts = 1735660800100
+# Sizes are multiples of lot_size 0.0001, written to 4 dp.
+bid = 68122.0 x 0.8500
+bid = 68121.5 x 2.4000
+bid = 68121.0 x 5.1000
+ask = 68125.5 x 0.7200
+ask = 68126.0 x 2.9000
+ask = 68126.5 x 6.3000

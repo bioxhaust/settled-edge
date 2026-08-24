@@ -1,0 +1,61 @@
+!unverified invented-from-memory-not-checked-against-live-api
+# Binance SPOT, BTCUSDT. Invented from memory, never fetched.
+#
+# NO [funding] SECTION. Spot pays no funding, and the format makes [funding]
+# FORBIDDEN here rather than optional. That is the right strictness: a spot row
+# carrying a funding rate is not a missing value, it is a category error, and it
+# would double-count carry in a spot-perp basis trade.
+#
+# This is the cash leg for spot-perp pairing against binance-btcusdt-perp.fix:
+#   spot mid = (68118.55 + 68119.60) / 2 = 68119.075
+#   perp mid = 68121.75
+#   basis = 68121.75 - 68119.075 = 2.675 USDT
+#   2.675 / 68119.075 = 3.927e-5 = 3.93 bp perp premium
+# Positive premium is consistent with the perp's positive funding rate: longs
+# pay, so the perp should trade above cash. Cash-and-carry captures the 3.93 bp
+# convergence PLUS the funding, against ~12 bp of edge target.
+
+venue = binance
+
+[instrument]
+base = BTC
+quote = USDT
+kind = spot
+# Spot "settles" in the quote asset in the sense that the quote is what leaves
+# the account; there is no settlement asset in the derivatives sense.
+settle = USDT
+native = BTCUSDT
+# base:1 is mandatory for spot -- one unit of the instrument is one BTC.
+contract_size = base:1
+# Spot BTCUSDT tick is recalled as 0.01, 10x FINER than the USD-M perp's 0.1.
+# If that memory is inverted, half these prices are off-tick and would be
+# rejected at submit -- a loud failure, which is the acceptable kind.
+tick_size = 0.01
+# 1e-5 BTC. Spot lot sizes are far finer than futures lot sizes.
+lot_size = 0.00001
+min_notional = 5
+
+[fees]
+# 0.1% / 0.1% -- the standard non-VIP, non-BNB-discount spot schedule.
+# FIVE TIMES the perp taker fee (0.055%), and spot fees are the reason most
+# textbook cash-and-carry spreads are not actually tradeable. A model that
+# reuses the futures fee schedule for spot understates round-trip cost by
+# ~16 bp, which is larger than our entire 12 bp edge.
+maker = 0.001
+taker = 0.001
+tier = unknown
+
+[book]
+# Spot depth carries lastUpdateId, a DIFFERENT counter from the futures stream's
+# lastUpdateId on the same symbol. Do not compare them.
+sequence = 44120987
+exchange_ts = 1735660800100
+# spread = 68119.60 - 68118.55 = 1.05 USDT
+# 1.05 / 68119.075 = 1.541e-5 = 1.54 bp
+# Sizes are multiples of lot_size 0.00001, written to 5 dp.
+bid = 68118.55 x 0.85210
+bid = 68118.40 x 1.44000
+bid = 68118.12 x 3.90000
+ask = 68119.60 x 0.61500
+ask = 68119.85 x 2.10000
+ask = 68120.30 x 5.75000

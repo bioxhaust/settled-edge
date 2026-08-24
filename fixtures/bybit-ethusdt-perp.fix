@@ -1,0 +1,51 @@
+!unverified invented-from-memory-not-checked-against-live-api
+# Bybit v5 linear perpetual, ETHUSDT. Invented from memory, never fetched.
+
+venue = bybit
+
+[instrument]
+base = ETH
+quote = USDT
+kind = linear_perp
+settle = USDT
+native = ETHUSDT
+contract_size = base:1
+tick_size = 0.01
+# 0.01 ETH, coarser than Binance's 0.001. Recalled, unverified. If it is really
+# 0.001 we are rejecting valid order sizes; if really 0.1 we submit invalid ones.
+lot_size = 0.01
+min_notional = 5
+
+[funding]
+# +0.019% per 8h vs Binance ETH 0.00012:
+#   spread = 0.00019 - 0.00012 = 0.00007 = 0.7 bp per 8h
+#          = 0.7 * 3 * 365 = 767 bp APR = 7.67% APR gross, before fees.
+# Round-trip taker fees on both legs are 4 * ~0.05% = 20 bp, so this spread
+# needs ~29 days of carry to clear costs. Worth having a row that does NOT pay.
+rate = 0.00019
+interval_secs = 28800
+next_funding_at = 1735689600000
+# mid = (3345.30 + 3345.40) / 2 = 3345.35
+# mark  3345.35 - 3345.35 = 0.00  -> 0.000 bp
+# index 3345.20 - 3345.35 = -0.15 -> -0.15 / 3345.35 = -4.484e-5 = -0.448 bp
+mark = 3345.35
+index = 3345.20
+exchange_ts = 1735660800000
+interval_source = venue
+rate_source = predicted
+
+[fees]
+maker = 0.0002
+taker = 0.00055
+tier = unknown
+
+[book]
+sequence = 4591277
+exchange_ts = 1735660800100
+# Sizes are multiples of lot_size 0.01.
+bid = 3345.30 x 15.20
+bid = 3345.25 x 28.40
+bid = 3345.19 x 55.00
+ask = 3345.40 x 11.30
+ask = 3345.46 x 33.70
+ask = 3345.52 x 70.10

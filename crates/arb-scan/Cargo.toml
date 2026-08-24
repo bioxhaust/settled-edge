@@ -1,0 +1,14 @@
+[package]
+name = "arb-scan"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+arb-num = { path = "../arb-num" }
+arb-types = { path = "../arb-types" }
+arb-math = { path = "../arb-math" }
+arb-book = { path = "../arb-book" }
+arb-detect = { path = "../arb-detect" }
+arb-venue = { path = "../arb-venue" }
