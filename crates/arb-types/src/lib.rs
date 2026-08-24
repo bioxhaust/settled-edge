@@ -35,7 +35,9 @@
 //! [`Provenance::SynthesizedUnverified`], all the way to the screen.
 
 mod book;
+mod borrow;
 mod funding;
+mod history;
 mod instrument;
 mod quality;
 mod strings;
@@ -43,7 +45,9 @@ mod time;
 mod venue;
 
 pub use book::{BookSnapshot, Level, Side};
+pub use borrow::{BorrowInterval, BorrowSnapshot};
 pub use funding::{FundingInterval, FundingSnapshot, PositionSide, SECONDS_PER_YEAR};
+pub use history::{RateHistory, SettledRate};
 pub use instrument::{
     ContractSize, ContractSpec, Instrument, InstrumentKey, MarketKind, SizeUnit, VenueKey,
 };
@@ -79,6 +83,17 @@ pub enum TypeError {
     /// An instrument's key and its contract spec disagreed about the settlement
     /// asset. Two sources of truth for settlement is one too many.
     SettleMismatch,
+    /// A borrow accrual period of zero seconds, which would divide by zero in
+    /// any annualisation.
+    ZeroBorrowInterval,
+    /// A negative borrow rate. Borrowing is a cost; a negative one would enter a
+    /// net-APR sum as revenue and rank the row above honest ones. See
+    /// [`BorrowSnapshot::new`].
+    NegativeBorrowRate,
+    /// Settled funding rates were not strictly increasing in time. A duplicate
+    /// stamp double-counts a period; an out-of-order one breaks any windowed
+    /// reasoning over the series. See [`RateHistory::new`].
+    UnsortedRateHistory,
 }
 
 impl fmt::Display for TypeError {
@@ -95,6 +110,11 @@ impl fmt::Display for TypeError {
                 "contract denomination disagrees with market kind"
             }
             TypeError::SettleMismatch => "instrument key and spec disagree on settle asset",
+            TypeError::ZeroBorrowInterval => "borrow accrual period of zero seconds",
+            TypeError::NegativeBorrowRate => "negative borrow rate, which is revenue not cost",
+            TypeError::UnsortedRateHistory => {
+                "settled funding rates not strictly increasing in time"
+            }
         };
         f.write_str(s)
     }
