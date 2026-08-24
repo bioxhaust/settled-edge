@@ -3,7 +3,7 @@
 use arb_num::{Bps, Money, Price, Qty, Rate};
 use arb_types::{
     Asset, BookSnapshot, ContractSize, ContractSpec, DataQuality, InstrumentKey, Level, LocalTs,
-    MarketKind, Venue, VenueKey,
+    MarketKind, SizeUnit, Venue, VenueKey,
 };
 
 pub fn price(s: &str) -> Price {
@@ -68,6 +68,7 @@ pub fn linear_spec(base_per: &str, lot: &str) -> ContractSpec {
         ContractSize::BasePerContract(qty(base_per)),
         asset("USDT"),
         price("0.1"),
+        SizeUnit::Base,
         qty(lot),
         None,
     )
@@ -81,6 +82,7 @@ pub fn inverse_spec(quote_per: &str, lot: &str) -> ContractSpec {
         ContractSize::QuotePerContract(money(quote_per)),
         asset("BTC"),
         price("0.1"),
+        SizeUnit::Contracts,
         qty(lot),
         None,
     )

@@ -18,6 +18,9 @@ native = BTC_USDT
 # Same symbol string as MEXC but a separate, independently unverified value.
 contract_size = base:0.0001
 tick_size = 0.1
+# Ladder and lot are denominated in the BASE asset.
+# Declared, never inferred from contract_size: see decisions/019 and 023.
+size_unit = base
 lot_size = 0.0001
 min_notional = 5
 

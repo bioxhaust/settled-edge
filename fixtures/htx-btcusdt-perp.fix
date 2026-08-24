@@ -21,6 +21,9 @@ native = BTC-USDT
 # HTX linear swap contract_size recalled as 0.001 BTC for BTC-USDT.
 contract_size = base:0.001
 tick_size = 0.1
+# Ladder and lot are denominated in the BASE asset.
+# Declared, never inferred from contract_size: see decisions/019 and 023.
+size_unit = base
 lot_size = 0.001
 
 [funding]

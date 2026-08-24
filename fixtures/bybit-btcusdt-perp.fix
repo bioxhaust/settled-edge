@@ -15,6 +15,9 @@ settle = USDT
 native = BTCUSDT
 contract_size = base:1
 tick_size = 0.1
+# Ladder and lot are denominated in the BASE asset.
+# Declared, never inferred from contract_size: see decisions/019 and 023.
+size_unit = base
 lot_size = 0.001
 min_notional = 5
 

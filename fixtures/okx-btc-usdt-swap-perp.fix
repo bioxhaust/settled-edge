@@ -19,6 +19,9 @@ native = BTC-USDT-SWAP
 # notional of every OKX leg is 10x wrong.
 contract_size = base:0.01
 tick_size = 0.1
+# Ladder and lot are denominated in the BASE asset.
+# Declared, never inferred from contract_size: see decisions/019 and 023.
+size_unit = base
 # lot_size is expressed in BASE units in every fixture (= ctVal * lotSz).
 # OKX's own lotSz field is in CONTRACTS. 0.01 base = 1 contract here.
 lot_size = 0.01

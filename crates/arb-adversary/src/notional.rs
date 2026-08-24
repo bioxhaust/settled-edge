@@ -5,7 +5,7 @@
 use arb_math::{contracts_for_notional, distance_to_liquidation_bps, liquidation_price,
                margin_required, round_down_to_lot, LiquidationInputs};
 use arb_num::{Money, Price, Qty, RoundMode};
-use arb_types::{ContractSize, ContractSpec, MarketKind, PositionSide};
+use arb_types::{ContractSize, ContractSpec, MarketKind, PositionSide, SizeUnit};
 
 use crate::support::{asset, bps, inverse_spec, linear_spec, money, price, qty, rate};
 
@@ -145,6 +145,7 @@ fn a_spec_cannot_pair_a_kind_with_the_wrong_size_denomination() {
         ContractSize::QuotePerContract(money("100")),
         asset("USDT"),
         price("0.1"),
+        SizeUnit::Base,
         qty("1"),
         None,
     )
@@ -154,6 +155,7 @@ fn a_spec_cannot_pair_a_kind_with_the_wrong_size_denomination() {
         ContractSize::BasePerContract(qty("0.01")),
         asset("BTC"),
         price("0.1"),
+        SizeUnit::Contracts,
         qty("1"),
         None,
     )
@@ -164,6 +166,7 @@ fn a_spec_cannot_pair_a_kind_with_the_wrong_size_denomination() {
         ContractSize::QuotePerContract(money("1")),
         asset("USDT"),
         price("0.01"),
+        SizeUnit::Base,
         qty("0.0001"),
         None,
     )
@@ -199,6 +202,7 @@ fn a_venue_minimum_is_not_enforced_here_so_it_must_be_enforced_by_the_ranker() {
         ContractSize::BasePerContract(qty("0.01")),
         asset("USDT"),
         price("0.1"),
+        SizeUnit::Base,
         qty("1"),
         Some(money("5000")),
     )
@@ -245,6 +249,7 @@ fn a_spec_built_by_struct_literal_reintroduces_the_whole_error() {
         size: ContractSize::QuotePerContract(money("1")),
         settle: asset("USDT"),
         tick_size: price("0.1"),
+        size_unit: SizeUnit::Base,
         lot_size: qty("1"),
         min_notional: None,
     };

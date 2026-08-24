@@ -646,7 +646,7 @@ mod tests {
     use super::*;
     use arb_math::contracts_for_notional;
     use arb_num::{Money, Price, Qty};
-    use arb_types::{Asset, ContractSize, ContractSpec, MarketKind};
+    use arb_types::{Asset, ContractSize, ContractSpec, MarketKind, SizeUnit};
 
     fn spec(kind: MarketKind, size: ContractSize, lot: Qty) -> ContractSpec {
         ContractSpec {
@@ -654,6 +654,9 @@ mod tests {
             size,
             settle: Asset::new("USDT").expect("asset"),
             tick_size: Price::from_raw(100_000_000_000),
+            // Every spec these tests build is linear or spot, and `arb-scan`
+            // works in ladder units throughout (decisions/019).
+            size_unit: SizeUnit::Base,
             lot_size: lot,
             min_notional: None,
         }

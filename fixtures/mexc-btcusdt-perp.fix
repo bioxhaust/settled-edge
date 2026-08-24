@@ -20,6 +20,9 @@ native = BTC_USDT
 # for the wrong reason.
 contract_size = base:0.0001
 tick_size = 0.1
+# Ladder and lot are denominated in the BASE asset.
+# Declared, never inferred from contract_size: see decisions/019 and 023.
+size_unit = base
 # BASE units, = ctVal * 1 contract.
 lot_size = 0.0001
 min_notional = 5

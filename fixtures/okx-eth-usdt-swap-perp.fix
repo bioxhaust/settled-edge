@@ -19,6 +19,9 @@ native = ETH-USDT-SWAP
 # swap's 0.01. The two are independent memories; neither is verified.
 contract_size = base:0.1
 tick_size = 0.01
+# Ladder and lot are denominated in the BASE asset.
+# Declared, never inferred from contract_size: see decisions/019 and 023.
+size_unit = base
 # BASE units (= ctVal * lotSz of 1 contract).
 lot_size = 0.1
 

@@ -21,6 +21,9 @@ native = ETH_USDT
 # MEXC ETH_USDT contract multiplier recalled as 0.01 ETH.
 contract_size = base:0.01
 tick_size = 0.01
+# Ladder and lot are denominated in the BASE asset.
+# Declared, never inferred from contract_size: see decisions/019 and 023.
+size_unit = base
 lot_size = 0.01
 min_notional = 5
 

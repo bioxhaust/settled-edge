@@ -413,6 +413,7 @@ settle = USDT
 native = BTCUSDT
 contract_size = base:1
 tick_size = 0.1
+size_unit = base
 lot_size = 0.001
 
 [funding]
@@ -446,6 +447,7 @@ settle = USDT
 native = ETHUSDT
 contract_size = base:1
 tick_size = 0.01
+size_unit = base
 lot_size = 0.001
 
 [funding]
@@ -663,18 +665,18 @@ tier = unknown
     #[test]
     fn a_line_number_in_the_second_document_is_absolute_within_the_buffer() {
         // A relative line number would send an engineer to the wrong line of the
-        // file they are actually editing. LINEAR is 27 lines including its
-        // trailing newline, so the second document's header is line 28 and its
-        // `taker` is line 51.
+        // file they are actually editing. LINEAR is 29 lines including its
+        // trailing newline, so the second document's header is line 30 and its
+        // `taker` is line 53.
         let broken = LINEAR_ETH.replacen("taker = 0.00055", "takr = 0.00055", 1);
         let text = format!("{LINEAR}{broken}");
         match FixtureAdapter::from_str(Venue::Binance, &text) {
             Err(VenueError::Parse { line, reason }) => {
                 assert_eq!(reason, ParseReason::MissingKey("taker"));
                 // The [fees] header of the SECOND document. Counting the buffer:
-                // LINEAR occupies lines 1..27, so document two starts at 28 and
-                // its [fees] header — the 22nd line of LINEAR_ETH — is 28+21=49.
-                assert_eq!(line, 49, "line must be absolute within the buffer");
+                // LINEAR occupies lines 1..29, so document two starts at 30 and
+                // its [fees] header — the 22nd line of LINEAR_ETH — is 29+22=51.
+                assert_eq!(line, 51, "line must be absolute within the buffer");
             }
             other => panic!("expected a parse error, got {other:?}"),
         }

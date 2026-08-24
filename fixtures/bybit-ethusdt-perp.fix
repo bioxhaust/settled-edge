@@ -11,6 +11,9 @@ settle = USDT
 native = ETHUSDT
 contract_size = base:1
 tick_size = 0.01
+# Ladder and lot are denominated in the BASE asset.
+# Declared, never inferred from contract_size: see decisions/019 and 023.
+size_unit = base
 # 0.01 ETH, coarser than Binance's 0.001. Recalled, unverified. If it is really
 # 0.001 we are rejecting valid order sizes; if really 0.1 we submit invalid ones.
 lot_size = 0.01

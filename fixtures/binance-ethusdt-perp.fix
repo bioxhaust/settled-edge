@@ -16,6 +16,9 @@ contract_size = base:1
 # ETH is ~20x cheaper than BTC, so the tick is 100x finer than BTCUSDT's 0.1.
 # 0.01 / 3345 = 3.0e-8 = 0.0003 bp per tick.
 tick_size = 0.01
+# Ladder and lot are denominated in the BASE asset.
+# Declared, never inferred from contract_size: see decisions/019 and 023.
+size_unit = base
 lot_size = 0.001
 # 20 USDT: ETHUSDT's MIN_NOTIONAL is recalled as higher than BTCUSDT's 5.
 min_notional = 20

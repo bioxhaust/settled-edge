@@ -68,8 +68,8 @@
 use arb_num::{Bps, Money, Price, Qty, Rate};
 use arb_types::{
     Asset, BookSnapshot, ContractSize, ContractSpec, DataQuality, FundingInterval,
-    FundingSnapshot, Instrument, InstrumentKey, Level, LocalTs, MarketKind, QualityFlags, Symbol,
-    Venue, VenueKey, WallTs,
+    FundingSnapshot, Instrument, InstrumentKey, Level, LocalTs, MarketKind, QualityFlags, SizeUnit,
+    Symbol, Venue, VenueKey, WallTs,
 };
 
 use crate::adapter::FeeSchedule;
@@ -423,6 +423,21 @@ fn as_market_kind(e: &Entry) -> Result<MarketKind, VenueError> {
     }
 }
 
+/// `base` or `contracts`.
+///
+/// Mandatory, with no default and no inference from `contract_size`. Inferring it
+/// is the defect class `decisions/019` records: on Binance one contract is one
+/// coin, so a wrong inference is numerically invisible there and wrong by 10,000x
+/// on Gate. A fixture that does not state the unit its ladder is denominated in
+/// is not describing a venue, and is refused. See `decisions/023` item 4.
+fn as_size_unit(e: &Entry) -> Result<SizeUnit, VenueError> {
+    match e.value.as_str() {
+        "base" => Ok(SizeUnit::Base),
+        "contracts" => Ok(SizeUnit::Contracts),
+        _ => Err(bad_enum("size_unit", e)),
+    }
+}
+
 /// `base:QTY` or `quote:MONEY`.
 ///
 /// The prefix is mandatory and there is no default. This one field is the
@@ -624,6 +639,10 @@ fn build(
     let size_entry = instrument.require("contract_size")?;
     let size = as_contract_size(&size_entry)?;
     let tick_size = as_price(&instrument.require("tick_size")?)?;
+    // Required, never inferred: see `as_size_unit`. A file that omits it fails
+    // with `MissingKey`, which is the point — the old parser inferred the unit
+    // from `contract_size` and was right only by luck on Binance.
+    let size_unit = as_size_unit(&instrument.require("size_unit")?)?;
     let lot_size = as_qty(&instrument.require("lot_size")?)?;
     let min_notional = match instrument.take("min_notional") {
         Some(e) => Some(as_money(&e)?),
@@ -633,7 +652,7 @@ fn build(
     // Reported against the `contract_size` line: the cross-field check that
     // fails here is almost always a `base:`/`quote:` prefix disagreeing with
     // `kind`, and that is the 68,000x error.
-    let spec = ContractSpec::new(kind, size, settle, tick_size, lot_size, min_notional)
+    let spec = ContractSpec::new(kind, size, settle, tick_size, size_unit, lot_size, min_notional)
         .map_err(|t| VenueError::parse(size_entry.line, ParseReason::Type(t)))?;
     instrument.finish()?;
 
@@ -808,6 +827,7 @@ settle = USDT
 native = BTCUSDT
 contract_size = base:1
 tick_size = 0.1
+size_unit = base
 lot_size = 0.001
 min_notional = 5
 
@@ -849,6 +869,7 @@ settle = BTC
 native = BTC-USD-SWAP
 contract_size = quote:100
 tick_size = 0.1
+size_unit = contracts
 lot_size = 1
 
 [funding]
@@ -877,6 +898,7 @@ settle = USDT
 native = ETH-USDT
 contract_size = base:1
 tick_size = 0.01
+size_unit = base
 lot_size = 0.0001
 min_notional = 1
 
@@ -1184,9 +1206,9 @@ ask = 3820.34 x 2.0
         assert_eq!(reason, ParseReason::MissingKey("taker"));
         // Reported against the [fees] header, since a missing key has no line of
         // its own. Counting LINEAR: 1 header, 2 comment, 3 venue, 4 blank,
-        // 5 [instrument], 6..14 its nine keys, 15 blank, 16 [funding],
-        // 17..24 its eight keys, 25 blank, 26 [fees].
-        assert_eq!(line, 26);
+        // 5 [instrument], 6..15 its ten keys, 16 blank, 17 [funding],
+        // 18..25 its eight keys, 26 blank, 27 [fees].
+        assert_eq!(line, 27);
     }
 
     #[test]

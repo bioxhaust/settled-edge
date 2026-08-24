@@ -32,6 +32,9 @@ native = BTC-USD-SWAP
 # conventions differ by exactly 100x and both are unverified).
 contract_size = quote:100
 tick_size = 0.1
+# Ladder and lot are counted in CONTRACTS, the unit an inverse book speaks.
+# Declared, never inferred from contract_size: see decisions/019 and 023.
+size_unit = contracts
 # lot_size in CONTRACTS here, not base units: on an inverse book the natural
 # size unit IS the contract. This is a different convention from the linear
 # fixtures and is called out in FIXTURES-UNVERIFIED.md as unresolved.

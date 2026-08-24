@@ -31,6 +31,9 @@ contract_size = base:1
 # If that memory is inverted, half these prices are off-tick and would be
 # rejected at submit -- a loud failure, which is the acceptable kind.
 tick_size = 0.01
+# Ladder and lot are denominated in the BASE asset.
+# Declared, never inferred from contract_size: see decisions/019 and 023.
+size_unit = base
 # 1e-5 BTC. Spot lot sizes are far finer than futures lot sizes.
 lot_size = 0.00001
 min_notional = 5

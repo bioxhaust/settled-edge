@@ -745,6 +745,7 @@ mod tests {
             ContractSize::QuotePerContract(Money::from_int(100).expect("ok")),
             asset("USDT"),
             Price::parse("0.1").expect("ok"),
+            SizeUnit::Base,
             Qty::parse("0.001").expect("ok"),
             None,
         );
@@ -758,6 +759,7 @@ mod tests {
             ContractSize::BasePerContract(Qty::ONE),
             asset("BTC"),
             Price::parse("0.5").expect("ok"),
+            SizeUnit::Contracts,
             Qty::ONE,
             None,
         );
@@ -771,6 +773,7 @@ mod tests {
             ContractSize::QuotePerContract(Money::ONE),
             asset("USDT"),
             Price::parse("0.01").expect("ok"),
+            SizeUnit::Base,
             Qty::parse("0.0001").expect("ok"),
             None,
         );
@@ -784,6 +787,7 @@ mod tests {
             ContractSize::BasePerContract(Qty::ONE),
             asset("USDT"),
             Price::parse("0.1").expect("ok"),
+            SizeUnit::Base,
             Qty::parse("0.001").expect("ok"),
             None,
         )
@@ -793,6 +797,7 @@ mod tests {
             ContractSize::QuotePerContract(Money::from_int(100).expect("ok")),
             asset("BTC"),
             Price::parse("0.5").expect("ok"),
+            SizeUnit::Contracts,
             Qty::ONE,
             None,
         )
@@ -808,6 +813,7 @@ mod tests {
             ContractSize::BasePerContract(Qty::ONE),
             asset("USDT"),
             Price::ZERO,
+            SizeUnit::Base,
             Qty::parse("0.001").expect("ok"),
             None,
         );
@@ -817,6 +823,7 @@ mod tests {
             ContractSize::BasePerContract(Qty::ONE),
             asset("USDT"),
             Price::parse("0.1").expect("ok"),
+            SizeUnit::Base,
             Qty::ZERO,
             None,
         );
@@ -832,6 +839,7 @@ mod tests {
             ContractSize::BasePerContract(Qty::ZERO),
             asset("USDT"),
             Price::parse("0.1").expect("ok"),
+            SizeUnit::Base,
             Qty::parse("0.001").expect("ok"),
             None,
         );

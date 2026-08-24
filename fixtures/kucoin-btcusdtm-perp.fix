@@ -20,6 +20,9 @@ native = XBTUSDTM
 # KuCoin `multiplier` for XBTUSDTM recalled as 0.001 BTC per contract.
 contract_size = base:0.001
 tick_size = 0.1
+# Ladder and lot are denominated in the BASE asset.
+# Declared, never inferred from contract_size: see decisions/019 and 023.
+size_unit = base
 # BASE units (= multiplier * 1 contract). KuCoin's lotSize field is in contracts.
 lot_size = 0.001
 # min_notional ABSENT: KuCoin gates on minimum 1 contract, not a quote notional.

@@ -174,7 +174,7 @@ pub fn contracts_for_notional(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arb_types::{Asset, MarketKind};
+    use arb_types::{Asset, MarketKind, SizeUnit};
 
     fn price(s: &str) -> Price {
         Price::parse(s).expect("test price parses")
@@ -203,6 +203,7 @@ mod tests {
             size: ContractSize::BasePerContract(qty(base_per)),
             settle: asset("USDT"),
             tick_size: price("0.1"),
+            size_unit: SizeUnit::Base,
             lot_size: qty(lot),
             min_notional: None,
         }
@@ -215,6 +216,7 @@ mod tests {
             size: ContractSize::QuotePerContract(money(quote_per)),
             settle: asset("BTC"),
             tick_size: price("0.1"),
+            size_unit: SizeUnit::Contracts,
             lot_size: qty(lot),
             min_notional: None,
         }

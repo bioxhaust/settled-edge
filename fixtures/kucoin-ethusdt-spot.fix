@@ -29,6 +29,9 @@ settle = USDT
 native = ETH-USDT
 contract_size = base:1
 tick_size = 0.01
+# Ladder and lot are denominated in the BASE asset.
+# Declared, never inferred from contract_size: see decisions/019 and 023.
+size_unit = base
 lot_size = 0.0001
 # KuCoin's spot minimum is recalled as tiny -- fractions of a dollar, unlike
 # Binance's 5 USDT floor. If wrong in the low direction we submit dust orders
