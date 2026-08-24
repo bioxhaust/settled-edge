@@ -130,6 +130,19 @@ pub enum ScanError {
     FundingKeyMismatch(VenueKey),
     /// The book belongs to an instrument other than the leg's.
     BookKeyMismatch(VenueKey),
+    /// The borrow snapshot was quoted at a different venue or instrument than the
+    /// leg's. Borrow rates differ by venue for the same asset, so accepting a
+    /// foreign quote would charge one venue's cost against another's position.
+    BorrowKeyMismatch(VenueKey),
+    /// The borrow snapshot is for an asset other than the leg's base. Shorting
+    /// spot borrows the *base*; a quote-asset borrow priced as a base borrow is
+    /// wrong by the whole price of the instrument.
+    BorrowAssetMismatch(VenueKey),
+    /// The rate history belongs to an instrument other than the leg's. The
+    /// commonest form is the symbol-map bug that `FundingKeyMismatch` guards
+    /// against, and the consequence is the same: one venue's persistence used to
+    /// justify holding another venue's position.
+    RateHistoryKeyMismatch(VenueKey),
     /// The side of the book we have to take has no levels, so there is no price
     /// at which our size could trade at all.
     NoLiquidity(VenueKey, Side),
@@ -163,6 +176,15 @@ impl fmt::Display for ScanError {
             }
             ScanError::BookKeyMismatch(v) => {
                 write!(f, "{} {} book is for another instrument", v.venue.as_str(), v.key)
+            }
+            ScanError::BorrowKeyMismatch(v) => {
+                write!(f, "{} {} borrow snapshot is for another venue or instrument", v.venue.as_str(), v.key)
+            }
+            ScanError::BorrowAssetMismatch(v) => {
+                write!(f, "{} {} borrow snapshot is for another asset than the leg's base", v.venue.as_str(), v.key)
+            }
+            ScanError::RateHistoryKeyMismatch(v) => {
+                write!(f, "{} {} rate history is for another instrument", v.venue.as_str(), v.key)
             }
             ScanError::NoLiquidity(v, side) => write!(
                 f,

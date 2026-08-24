@@ -55,6 +55,13 @@ pub enum Unrankable {
     /// One leg's book crosses itself: best bid at or above best ask. Either the
     /// feed is corrupt or the sides came from different instants.
     CrossedBook(VenueKey),
+    /// This row is a reverse carry — the short leg is spot, so opening it means
+    /// borrowing the base asset — and no borrow rate accompanies that leg. The
+    /// borrow can annualise into the tens of percent against an edge of twelve
+    /// basis points, so the printed `net_apr` omits a cost term large enough to
+    /// invert its sign. Blocked, not warned: the number is wrong, not imprecise.
+    /// See [`arb_types::QualityFlags::BORROW_COST_UNKNOWN`] and `OPEN.md` A1.
+    BorrowCostUnknown(VenueKey),
     /// The size the two books can jointly absorb is below the venue's own
     /// minimum, so this trade cannot legally be placed at any size.
     BelowMinNotional {
@@ -91,6 +98,9 @@ impl fmt::Display for Unrankable {
                 write!(f, "{} depth looks painted (score {score})", v.venue)
             }
             Unrankable::CrossedBook(v) => write!(f, "{} book crossed", v.venue),
+            Unrankable::BorrowCostUnknown(v) => {
+                write!(f, "{} short spot borrow rate unknown", v.venue)
+            }
             Unrankable::BelowMinNotional {
                 vkey,
                 available,

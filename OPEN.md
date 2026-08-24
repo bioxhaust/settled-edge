@@ -16,18 +16,27 @@ These are first in the file because they matter more than anything else in it.
 The round's stated edge is ~12 bps. Each item here is capable of exceeding that
 on its own, and none of them is modelled yet.
 
-### A1. Borrow cost on any short-spot leg — TYPES EXIST, NOTHING MEASURED
+### A1. Borrow cost on any short-spot leg — WIRED AND BLOCKING; NOTHING MEASURED
 
 `[fact, verified]` As of `decisions/025` `arb-types` carries `BorrowSnapshot` and
 `BorrowInterval`: the accrual period travels with the rate, and a negative rate is
-refused at construction. `[fact, verified]` `arb-math` still does not consume
-them, no fixture carries a `[borrow]` section, and nothing annualises a borrow.
+refused at construction. `[fact, verified]` `arb-math::borrow` annualises them
+(`annualise_borrow`, `annual_borrow_cost`, `net_apr_after_borrow`), and
+`arb-scan::scan::price_pair` now consumes that: a row whose short leg is spot
+either has its `net_apr` reduced by the annualised borrow, or is blocked by
+`Unrankable::BorrowCostUnknown` and flagged `QualityFlags::BORROW_COST_UNKNOWN`.
+`[fact, verified]` **No fixture carries a `[borrow]` section**, so in practice
+every reverse-carry row in a replay is blocked rather than priced. That is the
+intended behaviour, not a gap: a blocked row is the honest report of a missing
+cost term.
 
-`[fact, verified]` **`QualityFlags::BORROW_COST_UNKNOWN` exists, is in the
-`BLOCKING` set, and is raised by nothing.** A grep across every crate outside
-`arb-types` finds no producer; the only references are its own definition and its
-own tests. The vocabulary for admitting the gap was written before anything that
-could detect the gap, so the flag currently protects no row.
+`[fact, verified]` The flag now has a producer. Both branches are under test in
+`arb-scan`: `a_reverse_carry_with_no_borrow_quote_is_blocked_and_flagged` and
+`supplying_the_borrow_quote_unblocks_the_row_and_can_invert_its_sign`. The second
+is the argument for the flag being *blocking* rather than advisory — the same
+fixture nets +14.38% at a 0.02%/day borrow and −3.87% at 0.07%/day, against
++21.68% with the term omitted. Both were verified to fail when the wiring is
+removed, so the coverage is not self-confirming.
 
 `[assumption]` The classic cash-and-carry we rank (long spot, short perp) needs
 no borrow — you own the spot. But the *reverse* carry (short spot, long perp),
@@ -36,29 +45,18 @@ asset. Margin-borrow rates on the venues in scope are commonly quoted at daily
 rates that annualise into the tens of percent, i.e. one to three orders of
 magnitude larger than 12 bps.
 
-**Consequence if wrong:** every negative-funding opportunity we surface is
-overstated, possibly to the point of sign inversion. **Until this is modelled,
-negative-funding rows must not be presented as actionable.**
+**What remains open** is the measurement, not the model: no venue adapter fetches
+a borrow rate, so the term can only ever be supplied by hand. **Until a feed
+supplies it, every reverse-carry row is blocked, and that is the correct output.**
 
-`[fact, verified]` The question this item used to leave open — whether `arb-scan`
-excludes such rows or merely ranks them lower — resolves to **neither**. `arb-scan`
-contains no reference to borrowing and no special handling of a negative funding
-rate, so a reverse-carry row is ranked beside the others with no borrow term in its
-cost and no mark saying one is missing. The saving grace is incidental rather than
-designed: `arb-engine`'s test `not_one_row_of_a_fixture_replay_is_rankable` shows
-every replay row blocked by `Unrankable::Unverified` — the invented provenance
-itself — and not by any cost-model gap. **That protection expires exactly when it
-is needed:** the day a measured feed replaces the fixtures, `Unverified` stops
-firing and the borrow term is still missing, so the first rankable table this
-project ever prints is also the first one that can rank a reverse carry on a cost
-it never charged.
-
-**Two things the new types deliberately do not model, so they stay open:**
+**Three things the model deliberately does not cover, so they stay open:**
 `[assumption]` **availability** — a rate is not inventory, and a borrow that
-cannot be opened is an absent opportunity rather than an expensive one; and
+cannot be opened is an absent opportunity rather than an expensive one;
 `[assumption]` **rate variability** — margin rates move, on some venues with
 utilisation, so holding a week at today's quote is an assumption of the same kind
-as A5's.
+as A5's; and `[assumption]` **the borrow is charged against `net_apr` as an annual
+rate**, not amortised over the horizon the way the round trip is, which is right
+for a rate that accrues continuously and wrong if a venue charges it per-open.
 
 ### A2. Inter-venue transfer cost and latency — NOT MODELLED
 
@@ -119,9 +117,19 @@ series — settled rates only, strictly increasing in time, with `span()` and
 no probability: the verdict is `arb-detect`'s and the arithmetic is `arb-math`'s.
 `[fact, verified]` No fixture carries a `[history]` section, so every history in
 the workspace today is empty. `[fact, verified]` `QualityFlags::RATE_HISTORY_MISSING`
-is defined and, like `BORROW_COST_UNKNOWN`, **is raised by nothing** — so the
-obligation in the next sentence is currently unmet, not merely unverified. Every row
-*ought* to carry it; no row does.
+now **has a producer**: `arb-scan::scan::price_pair` raises it for any funding leg
+whose history is absent or empty, which is every replay row today. It warns rather
+than blocks, deliberately — an unmeasured *probability of persistence* makes the
+APR conditional, while an unmeasured *cost* makes it wrong, and only the second may
+not be ranked. So the obligation in the next sentence is now met at the flag level:
+every row does carry the mark.
+
+**What remains open** is that a flag is not a probability. Nothing yet reads
+`current_sign_run()` to say *how* conditional a given row is, so the report
+distinguishes "we have no history" from nothing else — a row backed by thirty days
+of one-signed funding and a row backed by nothing would both come back flagged the
+moment a feed supplied either. Sizing the conditional is A5's real content and it
+is untouched.
 
 Until that data exists, every `net_apr` in the report is conditional on "if the
 rate does not move", and the report must say so rather than imply it. Worked
@@ -280,9 +288,18 @@ convention, and remains in `FIXTURES-UNVERIFIED.md` until measured.
   `ContractSpec::min_notional` `[fact, verified]`. It answers "how many contracts
   fit in this much money"; a venue minimum is a reason to drop the row from the
   ranking, and the caller needs the size in order to *explain* why it was dropped.
-  `arb-scan` owns that check. `[fact, verified]` `arb-scan` currently contains no
-  reference to `min_notional` at all. If it does not implement the check, we will
-  submit legs venues reject.
+  `arb-scan` owns that check and now performs it: `price_pair` compares the
+  realised notional against each leg's `min_notional` and pushes
+  `Unrankable::BelowMinNotional { vkey, available, required }` `[fact, verified]`.
+  Five fixtures carry `min_notional = 5` and `kucoin-btcusdtm-perp` deliberately
+  omits it (KuCoin gates on a minimum contract count, not a quote notional)
+  `[fact, verified]`. **Still open:** at any target notional this project would
+  realistically use — $40 and up on $5,000 of capital — 5 USDT is never binding, so
+  the branch does not fire in a replay. It is coverage against a thin book shrinking
+  the size to nothing, which is exactly when it matters and exactly what no fixture
+  reproduces. `[assumption]` KuCoin's contract-count minimum is a *second* gate that
+  nothing checks; `min_notional: None` there records the absence of a notional floor,
+  not the absence of a floor.
 - **E7.** Duplicated fee representation: `arb-math` has `FeeRates`/`FeeTable` and
   `arb-venue` has `FeeSchedule` `[fact, verified]`. Both exist so that `arb-venue`
   does not depend on `arb-math`; `arb-scan` bridges them. Two types for one

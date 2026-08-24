@@ -40,9 +40,9 @@
 
 use arb_detect::{age_of, assess_age, assess_paint, assess_skew, is_crossed, ClockVerdict, Staleness};
 use arb_math::{
-    executable_price, liquidation_price, margin_required,
-    max_size_within_slippage, net_apr_over_horizon, periods_to_breakeven, round_down_to_lot,
-    slippage_bps, CarryLeg, LiquidationInputs, MathError,
+    annual_borrow_cost, executable_price, liquidation_price, margin_required,
+    max_size_within_slippage, net_apr_after_borrow, net_apr_over_horizon, periods_to_breakeven,
+    round_down_to_lot, slippage_bps, CarryLeg, LiquidationInputs, MathError,
 };
 use arb_num::{Bps, Money, Price, Qty, Rate, RoundMode};
 use arb_types::{ContractSize, ContractSpec, DataQuality, MarketKind, PositionSide, QualityFlags, Side, VenueKey};
@@ -446,6 +446,47 @@ pub fn price_pair(a: &LegInput, b: &LegInput, cfg: &ScanConfig) -> Result<Opport
 
     let net_apr = net_apr_over_horizon(gross_apr, cost_bps, cfg.horizon)?;
 
+    // Borrow cost on a reverse carry, and the two ways it can go.
+    //
+    // A short **spot** leg means selling the base asset we do not own, which means
+    // borrowing it. Cash-and-carry (long spot, short perp) owns the spot and needs
+    // no borrow; only the reverse carry a negative funding rate calls for does. The
+    // cost is not small: a CEX margin borrow annualises into the tens of percent
+    // against an edge of twelve basis points, so it can invert the sign of the
+    // number above (`OPEN.md` A1, `decisions/023`).
+    //
+    // - With a borrow snapshot, charge it as an **annual** rate via
+    //   `net_apr_after_borrow` — never amortised into the round trip, which would
+    //   divide by the horizon it should be multiplied by (`arb_math::borrow`).
+    // - Without one, the term is missing and the sign is in doubt, so the row is
+    //   blocked with `BORROW_COST_UNKNOWN` rather than ranked on a cost it never
+    //   charged. `net_apr` is left at its pre-borrow value — the block is the
+    //   honest signal; subtracting an unknown is not an option.
+    let mut carry_flags = QualityFlags::NONE;
+    let net_apr = if short.kind().is_perp() {
+        net_apr
+    } else {
+        match short.borrow.as_ref() {
+            Some(snap) => net_apr_after_borrow(net_apr, annual_borrow_cost(snap)?)?,
+            None => {
+                carry_flags = carry_flags.union(QualityFlags::BORROW_COST_UNKNOWN);
+                blocked.push(Unrankable::BorrowCostUnknown(short.vkey()));
+                net_apr
+            }
+        }
+    };
+
+    // Rate history. A funding leg with no settled-rate history makes `net_apr` a
+    // conditional — "this is the return *if* the rate holds" — rather than a
+    // forecast. That conditional is honestly useful, so this warns rather than
+    // blocks (`OPEN.md` A5); the report's job is to state the condition. A leg with
+    // an empty history is as unmeasured as one with none.
+    for leg in [short, long] {
+        if leg.funding.is_some() && leg.history.as_ref().is_none_or(|h| h.is_empty()) {
+            carry_flags = carry_flags.union(QualityFlags::RATE_HISTORY_MISSING);
+        }
+    }
+
     let margin = short_leg.margin.checked_add(long_leg.margin)?;
 
     // The nearer liquidation is the one that ends the trade. `None` on a leg means
@@ -463,7 +504,12 @@ pub fn price_pair(a: &LegInput, b: &LegInput, cfg: &ScanConfig) -> Result<Opport
     // worse than an absent one.
     let periods = breakeven_periods(short, long, cost_bps)?;
 
-    let quality = short_leg.quality.combine(long_leg.quality);
+    // The borrow and history verdicts are pair-level — they depend on which leg
+    // ended up short — so they are folded in here rather than in `assess_leg`.
+    let quality = short_leg
+        .quality
+        .combine(long_leg.quality)
+        .with_flags(carry_flags);
 
     Ok(Opportunity {
         short: short_leg,
@@ -646,7 +692,12 @@ mod tests {
     use super::*;
     use arb_math::contracts_for_notional;
     use arb_num::{Money, Price, Qty};
-    use arb_types::{Asset, ContractSize, ContractSpec, MarketKind, SizeUnit};
+    use arb_types::{
+        Asset, BookSnapshot, BorrowInterval, BorrowSnapshot, ContractSize, ContractSpec,
+        FundingInterval, FundingSnapshot, Instrument, InstrumentKey, Level, LocalTs, MarketKind,
+        Millis, RateHistory, SettledRate, SizeUnit, Symbol, Venue, WallTs,
+    };
+    use arb_venue::FeeSchedule;
 
     fn spec(kind: MarketKind, size: ContractSize, lot: Qty) -> ContractSpec {
         ContractSpec {
@@ -814,5 +865,488 @@ mod tests {
             // reason cannot tell a rule from a bug.
             assert!(!r.to_string().is_empty(), "{name} must explain itself");
         }
+    }
+
+    // -- the whole pipeline, end to end -----------------------------------
+    //
+    // Every test above stops at a function boundary. The tests below run
+    // `price_pair` from two `LegInput`s to a finished row, which until now was
+    // the only path through this module that nothing exercised — and it is the
+    // path that ships.
+    //
+    // # Why these fixtures claim `DataQuality::MEASURED`
+    //
+    // `assess_leg` pushes `Unrankable::Unverified` for any leg whose quality is
+    // not live-measured, and `Opportunity::is_rankable` is false while anything
+    // is in `blocked`. So a `SYNTHESIZED` fixture — the honest mark for every
+    // number in this repository, and what `arb_venue::FixtureAdapter` stamps —
+    // *cannot* reach the end of the pipeline rankable. That is the guard working
+    // as designed, and it is also why the guard hid the fact that nothing had
+    // ever run the rankable branch.
+    //
+    // These legs therefore lie about their provenance, deliberately and only
+    // here, to reach the branch. The lie is confined to this module: no fixture
+    // on disk is `MEASURED`, no adapter produces it, and the assertions below are
+    // about *arithmetic*, not about any market. Nothing here makes a shipped
+    // number real.
+
+    /// The ladder from `arb_detect::painted`'s own `healthy_book`, reused
+    /// verbatim.
+    ///
+    /// asks 0.5 + 0.8 + 1.2 + 1.5 + 2.0 = 6.0, bids 0.6 + 0.9 + 1.3 + 1.2 + 1.5
+    /// = 5.5, and two tests over there assert it fires no paint signal from
+    /// either side. Reusing the proven shape means a `PaintedDepth` block
+    /// appearing in these tests is a change in *this* crate's wiring, not a
+    /// carelessly shaped fixture.
+    ///
+    /// `PaintLimits::CONSERVATIVE` carries `tick_size: Price::ZERO`, so the gap
+    /// check falls to its 25 bps branch rather than the tick one; a 0.01 step on
+    /// a 100.00 touch is 1 bp, so it stays silent there too.
+    ///
+    /// The exchange stamp equals the observation instant, so `assess_skew` sees
+    /// zero skew and returns `Aligned`. A `None` stamp would also give `Aligned`,
+    /// which is why supplying one matters: it makes the clock path *exercised*
+    /// rather than defaulted.
+    fn clean_book(vkey: VenueKey) -> BookSnapshot {
+        fn lvl(price: &str, qty: &str) -> Level {
+            Level::new(
+                Price::parse(price).expect("price literal"),
+                Qty::parse(qty).expect("qty literal"),
+            )
+            .expect("level")
+        }
+        BookSnapshot::new(
+            vkey,
+            vec![
+                lvl("99.99", "0.6"),
+                lvl("99.98", "0.9"),
+                lvl("99.97", "1.3"),
+                lvl("99.96", "1.2"),
+                lvl("99.95", "1.5"),
+            ],
+            vec![
+                lvl("100.00", "0.5"),
+                lvl("100.01", "0.8"),
+                lvl("100.02", "1.2"),
+                lvl("100.03", "1.5"),
+                lvl("100.04", "2.0"),
+            ],
+            Some(1),
+            Some(WallTs::EPOCH),
+            LocalTs::EPOCH,
+            DataQuality::MEASURED,
+        )
+        .expect("book")
+    }
+
+    fn vkey_of(venue: Venue, kind: MarketKind) -> VenueKey {
+        VenueKey::new(
+            venue,
+            InstrumentKey::parse("BTC", "USDT", kind, "USDT").expect("key"),
+        )
+    }
+
+    /// One contract is one coin and the lot is 0.001, so book units, contracts
+    /// and base all coincide and no unit conversion can hide inside these
+    /// assertions. The unit-boundary tests above are where that conversion is
+    /// under test.
+    fn instrument_of(venue: Venue, kind: MarketKind) -> Instrument {
+        Instrument::new(
+            vkey_of(venue, kind),
+            Symbol::new("BTCUSDT").expect("symbol"),
+            spec(kind, base_per("1"), Qty::parse("0.001").expect("lot")),
+        )
+    }
+
+    fn funding_every(vkey: VenueKey, rate: &str, interval: FundingInterval) -> FundingSnapshot {
+        FundingSnapshot {
+            vkey,
+            rate: Rate::parse(rate).expect("rate literal"),
+            interval,
+            next_funding_at: None,
+            mark: None,
+            index: None,
+            exchange_ts: WallTs::EPOCH,
+            observed_at: LocalTs::EPOCH,
+            quality: DataQuality::MEASURED,
+        }
+    }
+
+    fn funding_at(vkey: VenueKey, rate: &str) -> FundingSnapshot {
+        funding_every(vkey, rate, FundingInterval::EIGHT_HOURS)
+    }
+
+    /// A one-entry history. Its contents are never read here; what matters is
+    /// that it is non-empty, so `RATE_HISTORY_MISSING` stays off and the row's
+    /// flags are exactly the ones under test.
+    fn history_at(vkey: VenueKey, rate: &str) -> RateHistory {
+        RateHistory::new(
+            vkey,
+            vec![SettledRate {
+                settled_at: WallTs::EPOCH,
+                rate: Rate::parse(rate).expect("rate literal"),
+            }],
+            DataQuality::MEASURED,
+        )
+        .expect("history")
+    }
+
+    /// `known`, not `assumed`: an assumed tier sets `FEE_TIER_ASSUMED`, and while
+    /// that flag does not block, it would put a flag on a row these tests assert
+    /// is flagless.
+    fn fees_taking(taker_bps: &str) -> FeeSchedule {
+        FeeSchedule::known(
+            Bps::parse_bps("1").expect("maker bps"),
+            Bps::parse_bps(taker_bps).expect("taker bps"),
+        )
+    }
+
+    /// `now` equals every `observed_at` in these fixtures, so both staleness
+    /// checks see an age of zero and return `Fresh`.
+    ///
+    /// `horizon` is a parameter because it is the only lever that changes the
+    /// answer while the fixture stays fixed — see
+    /// [`the_round_trip_is_amortised_over_the_horizon_not_charged_once`].
+    fn cfg_holding_for(horizon_secs: i64) -> ScanConfig {
+        ScanConfig::conservative(
+            Money::from_int(40).expect("target notional"),
+            Rate::from_int(3).expect("leverage"),
+            Millis::from_secs(horizon_secs),
+            LocalTs::EPOCH,
+        )
+        .expect("config")
+    }
+
+    /// One year, so `net_apr_over_horizon`'s amortisation factor is exactly 1
+    /// and `net_apr` is `gross_apr` minus `cost_bps` read as a rate. Isolating
+    /// the subtraction is the point; the factor gets its own test.
+    const ONE_YEAR_SECS: i64 = 31_536_000;
+
+    /// Two perp legs with opposite-signed funding, so *both* sides are paid.
+    ///
+    /// MEXC at +0.0001 per 8h pays its shorts; OKX at −0.0001 per 8h pays its
+    /// longs. `assign_sides` must therefore short MEXC and hold OKX long, and it
+    /// must reach that from the annualised receipts rather than from the
+    /// published rates.
+    fn clean_perp_pair() -> (LegInput, LegInput) {
+        let mexc = vkey_of(Venue::Mexc, MarketKind::LinearPerp);
+        let okx = vkey_of(Venue::Okx, MarketKind::LinearPerp);
+        let a = LegInput::with_carry_inputs(
+            instrument_of(Venue::Mexc, MarketKind::LinearPerp),
+            Some(funding_at(mexc, "0.0001")),
+            clean_book(mexc),
+            fees_taking("6"),
+            DataQuality::MEASURED,
+            None,
+            Some(history_at(mexc, "0.0001")),
+        )
+        .expect("mexc leg");
+        let b = LegInput::with_carry_inputs(
+            instrument_of(Venue::Okx, MarketKind::LinearPerp),
+            Some(funding_at(okx, "-0.0001")),
+            clean_book(okx),
+            fees_taking("5"),
+            DataQuality::MEASURED,
+            None,
+            Some(history_at(okx, "-0.0001")),
+        )
+        .expect("okx leg");
+        (a, b)
+    }
+
+    /// The row that ships: nothing blocked, nothing flagged, and every number a
+    /// hand computation.
+    ///
+    /// Until this test existed the rankable branch of `price_pair` had never
+    /// run — every fixture in the repository is `SYNTHESIZED` and therefore
+    /// blocked at `Unrankable::Unverified` before reaching it.
+    #[test]
+    fn a_clean_perp_pair_ranks_and_every_number_is_the_hand_computation() {
+        let (a, b) = clean_perp_pair();
+        let opp = price_pair(&a, &b, &cfg_holding_for(ONE_YEAR_SECS)).expect("row");
+
+        // ---- the row is rankable, which is the whole point ----------------
+        assert!(
+            opp.blocked.is_empty(),
+            "clean inputs must block nothing, got {:?}",
+            opp.blocked
+        );
+        assert_eq!(opp.quality.flags, QualityFlags::NONE);
+        assert!(opp.is_rankable());
+
+        // ---- sides ---------------------------------------------------------
+        // Shorting MEXC and holding OKX long earns +0.1095 + +0.1095; the
+        // reverse earns −0.1095 + −0.1095.
+        //
+        // Both legs settle on the same interval here, so ordering them by
+        // published rate would reach the same answer — this fixture does *not*
+        // discriminate between the two rules. See
+        // [`the_sides_are_ordered_by_annualised_receipt_not_by_published_rate`]
+        // for the case where the two rules disagree.
+        assert_eq!(opp.short.vkey, vkey_of(Venue::Mexc, MarketKind::LinearPerp));
+        assert_eq!(opp.long.vkey, vkey_of(Venue::Okx, MarketKind::LinearPerp));
+        assert_eq!(opp.short.side, PositionSide::Short);
+        assert_eq!(opp.long.side, PositionSide::Long);
+
+        // The venue's own number, carried through untouched so it can be
+        // reconciled against the exchange's screen.
+        assert_eq!(opp.short.published_rate, Rate::parse("0.0001").expect("rate"));
+        assert_eq!(opp.long.published_rate, Rate::parse("-0.0001").expect("rate"));
+
+        // ---- size and notional -------------------------------------------
+        // 40 USDT at the ask touch of 100.00 is 0.4 base, and 0.4 is a whole
+        // multiple of the 0.001 lot, so nothing rounds off it.
+        assert_eq!(opp.size, Qty::parse("0.4").expect("qty"));
+        // Realised at the long leg's VWAP, which *is* the touch here: 0.4 fits
+        // inside the 0.5 resting at 100.00, so 0.4 * 100.00 = 40 exactly, and
+        // the budget is met rather than overshot.
+        assert_eq!(opp.notional, Money::from_int(40).expect("money"));
+
+        // ---- gross ---------------------------------------------------------
+        // 31_536_000 / 28_800 = 1095 settlements a year, exactly.
+        //   short MEXC: +0.0001 * 1095 = +0.1095
+        //   long  OKX : −(−0.0001) * 1095 = +0.1095
+        // Both are receipts, so the sum is 0.2190 — raw 219_000_000_000 at
+        // Rate's 1e12 scale.
+        assert_eq!(opp.short.annual_receipt.raw(), 109_500_000_000);
+        assert_eq!(opp.long.annual_receipt.raw(), 109_500_000_000);
+        assert_eq!(opp.gross_apr.raw(), 219_000_000_000);
+
+        // ---- costs ---------------------------------------------------------
+        // Four crossings, each at its own venue's taker rate: 6 + 6 on the MEXC
+        // leg and 5 + 5 on the OKX leg. 22 bps — not 4x either rate, which is
+        // the error `round_trip_bps` exists to prevent, and not 4x the maker
+        // rate either, which is what a non-`ALL_TAKER` round trip would give.
+        assert_eq!(opp.fee_bps, Bps::from_whole(22).expect("bps"));
+        // Both legs fill entirely at the touch — 0.4 against 0.6 resting on the
+        // bid and 0.5 on the ask — so VWAP equals touch and there is no depth
+        // cost to charge. This is what isolates the fee arithmetic below.
+        assert_eq!(opp.short.slippage, Bps::ZERO);
+        assert_eq!(opp.long.slippage, Bps::ZERO);
+        assert_eq!(opp.slippage_bps, Bps::ZERO);
+        assert_eq!(opp.cost_bps, Bps::from_whole(22).expect("bps"));
+
+        // ---- net -----------------------------------------------------------
+        // Held one year: 22 bps * 31_536_000 / 31_536_000 = 22 bps = 0.0022.
+        // 0.2190 − 0.0022 = 0.2168.
+        assert_eq!(opp.net_apr.raw(), 216_800_000_000);
+
+        // ---- breakeven -----------------------------------------------------
+        // Per settlement the pair receives 0.0001 + 0.0001 = 0.0002 = 2 bps,
+        // and 22 bps of round trip needs ceil(22 / 2) = 11 of them. Both legs
+        // settle on 8h, so the count has a unit.
+        assert_eq!(opp.periods_to_breakeven, Some(11));
+
+        // Both legs are perps, so both can be liquidated and the row must carry
+        // the nearer distance rather than nothing.
+        assert!(opp.distance_to_liq.is_some());
+    }
+
+    /// The same fixture held for one settlement instead of a year.
+    ///
+    /// This is the number the rest of the market does not show: nothing about
+    /// the market changed between this test and the one above, only how long we
+    /// intend to hold, and a +21.90% headline is a −219.00% trade.
+    ///
+    /// And it is still **rankable**. A negative net is a fact about the market;
+    /// `blocked` is for facts about the data. Conflating them would hide either
+    /// the bad trade or the bad feed.
+    #[test]
+    fn the_round_trip_is_amortised_over_the_horizon_not_charged_once() {
+        let (a, b) = clean_perp_pair();
+        // One 8h settlement.
+        let opp = price_pair(&a, &b, &cfg_holding_for(28_800)).expect("row");
+
+        // Unchanged: the horizon is not an input to either of these.
+        assert_eq!(opp.gross_apr.raw(), 219_000_000_000);
+        assert_eq!(opp.cost_bps, Bps::from_whole(22).expect("bps"));
+
+        // 0.0022 * 31_536_000 / 28_800 = 0.0022 * 1095 = 2.4090 of annual drag,
+        // against 0.2190 of annual receipt: 0.2190 − 2.4090 = −2.1900.
+        assert_eq!(opp.net_apr.raw(), -2_190_000_000_000);
+        assert!(opp.net_apr.is_negative());
+
+        assert!(opp.blocked.is_empty(), "got {:?}", opp.blocked);
+        assert!(
+            opp.is_rankable(),
+            "a losing trade is still a priced trade; only bad data is unrankable"
+        );
+    }
+
+    /// Two perps on different settlement clocks, where the two candidate rules
+    /// give **opposite** answers.
+    ///
+    /// MEXC publishes +0.0001 every hour; OKX publishes +0.0003 every eight.
+    /// OKX's printed number is three times MEXC's, so "short the venue with the
+    /// higher published rate" shorts OKX. Annualised, MEXC pays 8760 times a
+    /// year and OKX 1095:
+    ///
+    /// - short MEXC, long OKX: +0.8760 + −0.3285 = **+0.5475**
+    /// - short OKX, long MEXC: +0.3285 + −0.8760 = **−0.5475**
+    ///
+    /// So the correct short is the leg with the *lower* published rate, and the
+    /// naive rule does not merely mis-rank this pair — it takes the wrong side of
+    /// it, turning +54.75% into −54.75%. This is the arithmetic
+    /// [`crate::opportunity::Opportunity::gross_apr`] warns about, under test.
+    #[test]
+    fn the_sides_are_ordered_by_annualised_receipt_not_by_published_rate() {
+        let mexc = vkey_of(Venue::Mexc, MarketKind::LinearPerp);
+        let okx = vkey_of(Venue::Okx, MarketKind::LinearPerp);
+        let a = LegInput::with_carry_inputs(
+            instrument_of(Venue::Mexc, MarketKind::LinearPerp),
+            Some(funding_every(mexc, "0.0001", FundingInterval::ONE_HOUR)),
+            clean_book(mexc),
+            fees_taking("6"),
+            DataQuality::MEASURED,
+            None,
+            Some(history_at(mexc, "0.0001")),
+        )
+        .expect("mexc leg");
+        let b = LegInput::with_carry_inputs(
+            instrument_of(Venue::Okx, MarketKind::LinearPerp),
+            Some(funding_every(okx, "0.0003", FundingInterval::EIGHT_HOURS)),
+            clean_book(okx),
+            fees_taking("5"),
+            DataQuality::MEASURED,
+            None,
+            Some(history_at(okx, "0.0003")),
+        )
+        .expect("okx leg");
+
+        let opp = price_pair(&a, &b, &cfg_holding_for(ONE_YEAR_SECS)).expect("row");
+
+        assert!(opp.blocked.is_empty(), "got {:?}", opp.blocked);
+        assert!(opp.is_rankable());
+
+        // The lower published rate is the one we short.
+        assert_eq!(opp.short.vkey, mexc);
+        assert_eq!(opp.long.vkey, okx);
+        assert!(opp.short.published_rate < opp.long.published_rate);
+
+        // 0.0001 * 31_536_000 / 3_600 = 0.0001 * 8760 = 0.8760 received.
+        assert_eq!(opp.short.annual_receipt.raw(), 876_000_000_000);
+        // 0.0003 * 31_536_000 / 28_800 = 0.0003 * 1095 = 0.3285, paid out.
+        assert_eq!(opp.long.annual_receipt.raw(), -328_500_000_000);
+        // 0.8760 − 0.3285 = 0.5475, and its sign is the whole argument.
+        assert_eq!(opp.gross_apr.raw(), 547_500_000_000);
+        assert!(opp.gross_apr.is_positive());
+
+        // 22 bps over a year again: 0.5475 − 0.0022 = 0.5453.
+        assert_eq!(opp.cost_bps, Bps::from_whole(22).expect("bps"));
+        assert_eq!(opp.net_apr.raw(), 545_300_000_000);
+
+        // No breakeven count: the two legs settle on different clocks, so
+        // "periods" has no shared unit and a number here would be meaningless.
+        // Reported as absent rather than as a count in one leg's periods.
+        assert_eq!(opp.periods_to_breakeven, None);
+    }
+
+    /// A reverse carry: Bybit's perp funds at −0.0002 per 8h, so its *longs* are
+    /// paid, and the hedge is a **short spot** leg — which means borrowing BTC.
+    ///
+    /// `assign_sides` must reach that on its own: spot receives no funding at
+    /// all, so shorting spot scores 0 + 0.2190 while shorting the perp scores
+    /// −0.2190 + 0.
+    fn reverse_carry_pair(borrow: Option<BorrowSnapshot>) -> (LegInput, LegInput) {
+        let spot = vkey_of(Venue::Binance, MarketKind::Spot);
+        let perp = vkey_of(Venue::Bybit, MarketKind::LinearPerp);
+        let a = LegInput::with_carry_inputs(
+            instrument_of(Venue::Binance, MarketKind::Spot),
+            None,
+            clean_book(spot),
+            fees_taking("5"),
+            DataQuality::MEASURED,
+            borrow,
+            None,
+        )
+        .expect("spot leg");
+        let b = LegInput::with_carry_inputs(
+            instrument_of(Venue::Bybit, MarketKind::LinearPerp),
+            Some(funding_at(perp, "-0.0002")),
+            clean_book(perp),
+            fees_taking("6"),
+            DataQuality::MEASURED,
+            None,
+            Some(history_at(perp, "-0.0002")),
+        )
+        .expect("perp leg");
+        (a, b)
+    }
+
+    fn borrow_per_day(rate: &str) -> BorrowSnapshot {
+        BorrowSnapshot::new(
+            vkey_of(Venue::Binance, MarketKind::Spot),
+            Asset::new("BTC").expect("asset"),
+            Rate::parse(rate).expect("rate literal"),
+            BorrowInterval::DAILY,
+            Some(WallTs::EPOCH),
+            LocalTs::EPOCH,
+            DataQuality::MEASURED,
+        )
+        .expect("borrow")
+    }
+
+    /// A reverse carry with no borrow quote is blocked, and its `net_apr` is
+    /// left alone.
+    ///
+    /// Both halves matter. Blocking is the honest signal that a cost term is
+    /// missing; *not* adjusting `net_apr` is the refusal to subtract a number
+    /// nobody supplied. Subtracting a guess would be a second invented figure
+    /// dressed as a correction. `OPEN.md` A1, `decisions/023`.
+    #[test]
+    fn a_reverse_carry_with_no_borrow_quote_is_blocked_and_flagged() {
+        let (a, b) = reverse_carry_pair(None);
+        let opp = price_pair(&a, &b, &cfg_holding_for(ONE_YEAR_SECS)).expect("row");
+
+        let spot = vkey_of(Venue::Binance, MarketKind::Spot);
+        assert_eq!(opp.short.vkey, spot, "the spot leg is the one being shorted");
+        // Spot cannot be liquidated, which is exactly why it must be borrowed.
+        assert!(opp.short.liquidation.is_none());
+
+        // Exactly one blocker, naming the leg that owes the borrow.
+        assert_eq!(opp.blocked, vec![Unrankable::BorrowCostUnknown(spot)]);
+        // And exactly one flag: the spot leg has no funding, so the rate-history
+        // check skips it, and the perp leg's history is present.
+        assert_eq!(opp.quality.flags, QualityFlags::BORROW_COST_UNKNOWN);
+        assert!(!opp.is_rankable());
+
+        // −(−0.0002) * 1095 = +0.2190 on the long perp, nothing on spot, less
+        // 22 bps of round trip over a year: 0.2190 − 0.0022 = 0.2168. Reported
+        // as-is, with no borrow term guessed into it.
+        assert_eq!(opp.gross_apr.raw(), 219_000_000_000);
+        assert_eq!(opp.net_apr.raw(), 216_800_000_000);
+    }
+
+    /// Supplying the quote unblocks the row — and can invert its sign.
+    ///
+    /// The two borrow rates here are the whole argument for
+    /// `QualityFlags::BORROW_COST_UNKNOWN` being *blocking* rather than a
+    /// warning. At 0.0002 per day the borrow eats a third of the edge; at 0.0007
+    /// it eats all of it and 3.87 points more. A row that omitted the term would
+    /// have printed +21.68% both times and sorted at the top of the table.
+    #[test]
+    fn supplying_the_borrow_quote_unblocks_the_row_and_can_invert_its_sign() {
+        // 0.0002 per day: 0.0002 * 31_536_000 / 86_400 = 0.0002 * 365 = 0.0730.
+        // 0.2168 − 0.0730 = 0.1438.
+        let (a, b) = reverse_carry_pair(Some(borrow_per_day("0.0002")));
+        let opp = price_pair(&a, &b, &cfg_holding_for(ONE_YEAR_SECS)).expect("row");
+        assert!(opp.blocked.is_empty(), "got {:?}", opp.blocked);
+        assert_eq!(opp.quality.flags, QualityFlags::NONE);
+        assert!(opp.is_rankable());
+        // Gross and cost are untouched by the borrow: it is charged as an annual
+        // rate against the net, never amortised into the round trip.
+        assert_eq!(opp.gross_apr.raw(), 219_000_000_000);
+        assert_eq!(opp.cost_bps, Bps::from_whole(22).expect("bps"));
+        assert_eq!(opp.net_apr.raw(), 143_800_000_000);
+
+        // 0.0007 per day: 0.0007 * 365 = 0.2555, and 0.2168 − 0.2555 = −0.0387.
+        // Same market, same fees, same size — the sign of the answer is decided
+        // by the term the unblocked row was missing.
+        let (a, b) = reverse_carry_pair(Some(borrow_per_day("0.0007")));
+        let opp = price_pair(&a, &b, &cfg_holding_for(ONE_YEAR_SECS)).expect("row");
+        assert!(opp.blocked.is_empty(), "got {:?}", opp.blocked);
+        assert!(opp.is_rankable());
+        assert_eq!(opp.net_apr.raw(), -38_700_000_000);
+        assert!(opp.net_apr.is_negative());
     }
 }
