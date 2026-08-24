@@ -50,16 +50,21 @@
 #![forbid(unsafe_code)]
 
 pub mod basis;
+pub mod borrow;
 pub mod error;
 pub mod execution;
 pub mod fees;
 pub mod funding;
 pub mod liquidation;
+pub mod persistence;
 pub mod sizing;
 
 pub use error::MathError;
 
 pub use basis::{basis_bps, basis_ratio, convergence_capture};
+pub use borrow::{
+    annual_borrow_cost, annualise_borrow, borrow_cost, borrow_rate_over, net_apr_after_borrow,
+};
 pub use execution::{
     executable_price, max_size_within_slippage, slippage_bps, Execution, SlippageBudget,
 };
@@ -68,4 +73,8 @@ pub use funding::{
     annualise, funding_payment, net_apr_over_horizon, periods_to_breakeven, CarryLeg,
 };
 pub use liquidation::{distance_to_liquidation_bps, liquidation_price, LiquidationInputs};
+pub use persistence::{
+    annualise_realised, coverage, mean_settled_rate, periods_as_time,
+    realised_receipt_per_period, sign_flips, HistoryCoverage,
+};
 pub use sizing::{contracts_for_notional, margin_required, round_down_to_lot};

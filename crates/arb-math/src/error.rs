@@ -68,6 +68,16 @@ pub enum MathError {
     /// here: a negative fee turns a cost into revenue and every conservative
     /// rounding decision in this crate inverts.
     NegativeFeeRate,
+    /// A borrow rate was negative. Distinct from [`MathError::NegativeFeeRate`]
+    /// because the two are refused at different places for different reasons and a
+    /// caller deciding what to tell the operator needs to know which cost term was
+    /// malformed. A negative borrow is *subtracted* from net APR, so it arrives as
+    /// revenue and lifts the row to the top of the ranking.
+    NegativeBorrowRate,
+    /// A statistic was requested over a rate history with no entries. Returning
+    /// zero would be a claim about the venue rather than an admission that nothing
+    /// is on record, and zero is a legitimate funding rate.
+    EmptyHistory,
     /// The formula for this market kind is not implemented, and guessing it
     /// would produce a confident wrong number.
     UnsupportedMarket(&'static str),
@@ -103,6 +113,10 @@ impl fmt::Display for MathError {
                 f.write_str("fee tier table has two rows at the same volume threshold")
             }
             MathError::NegativeFeeRate => f.write_str("fee rate is negative"),
+            MathError::NegativeBorrowRate => {
+                f.write_str("borrow rate is negative, which is revenue not cost")
+            }
+            MathError::EmptyHistory => f.write_str("rate history has no entries"),
             MathError::UnsupportedMarket(what) => write!(f, "unsupported market: {what}"),
         }
     }

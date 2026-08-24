@@ -59,8 +59,11 @@ use arb_types::{
 /// direction is mechanical: shrink receipts, grow costs. Both branches happen to
 /// equal "round toward negative infinity", but naming them by their economic
 /// meaning is what stops the next reader from flipping one.
+///
+/// `pub(crate)` so [`crate::persistence`] applies the identical rule to a realised
+/// rate. Two copies of this decision would be two places to get it backwards.
 #[inline]
-const fn against_us(value: Rate) -> RoundMode {
+pub(crate) const fn against_us(value: Rate) -> RoundMode {
     if value.is_negative() {
         // Money leaving. Round the magnitude up so we never understate a cost.
         RoundMode::COST
