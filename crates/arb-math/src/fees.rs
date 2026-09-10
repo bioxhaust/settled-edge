@@ -78,6 +78,28 @@ impl FeeRates {
             FeeRole::Taker => self.taker,
         }
     }
+
+    /// Re-check the invariant [`Self::new`] established.
+    ///
+    /// `maker` and `taker` are `pub` and are read by `arb-adversary`, `arb-engine`,
+    /// `arb-live`, `arb-scan` and `arb-venue`, so they cannot be made private and
+    /// the constructor's check is a courtesy rather than a fence: one struct
+    /// literal reaches a negative rate. Every function in this crate that does
+    /// arithmetic on a `FeeRates` therefore checks for itself, at the last point
+    /// the value is used and not only at the first point it was built — the same
+    /// argument [`crate::borrow::net_apr_after_borrow`] makes for borrow.
+    ///
+    /// **Both** fields are checked regardless of which roles the configuration
+    /// consults. A [`RoundTrip`] that happens to read only `taker` today is a
+    /// configuration away from reading `maker`, and a schedule carrying a
+    /// negative rate in the field this call does not touch is still a schedule we
+    /// have no honest arithmetic for.
+    fn check_non_negative(&self) -> Result<(), MathError> {
+        if self.maker.is_negative() || self.taker.is_negative() {
+            return Err(MathError::NegativeFeeRate);
+        }
+        Ok(())
+    }
 }
 
 /// One row of a venue's fee schedule.
@@ -331,7 +353,13 @@ impl RoundTrip {
     /// The "same schedule" assumption is **false for every cross-venue row in this
     /// product** — two venues, two fee tables. Use [`RoundTrip::total_bps_cross`]
     /// there. This one remains for the single-venue case and for tests.
+    ///
+    /// Refuses a `FeeRates` carrying a negative rate; see
+    /// [`FeeRates::check_non_negative`]. Four all-taker legs at −5.5 bps summed to
+    /// −22 bps here without an error, and a round trip that *pays* is subtracted
+    /// from the net as revenue.
     pub fn total_bps(&self, rates: FeeRates) -> Result<Bps, MathError> {
+        rates.check_non_negative()?;
         let mut total = Bps::ZERO;
         for role in [self.entry_a, self.entry_b, self.exit_a, self.exit_b] {
             total = total.checked_add(rates.rate(role))?;
@@ -350,7 +378,13 @@ impl RoundTrip {
     ///
     /// Still one notional for both legs, for the reason [`RoundTrip::total_bps`]
     /// gives.
+    ///
+    /// **Both** schedules are checked, and both of each schedule's fields, even
+    /// when the configuration reads only one role from one of them — see
+    /// [`FeeRates::check_non_negative`].
     pub fn total_bps_cross(&self, rates_a: FeeRates, rates_b: FeeRates) -> Result<Bps, MathError> {
+        rates_a.check_non_negative()?;
+        rates_b.check_non_negative()?;
         let mut total = Bps::ZERO;
         for (role, rates) in [
             (self.entry_a, rates_a),

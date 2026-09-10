@@ -68,7 +68,9 @@ mod muldiv;
 mod round;
 mod units;
 
-pub use decimal::{format_scaled, format_scaled_places, parse_scaled, pow10_i128};
+pub use decimal::{
+    format_scaled, format_scaled_places, parse_scaled, parse_scaled_rounded, pow10_i128,
+};
 pub use error::NumError;
 pub use muldiv::mul_div;
 pub use round::RoundMode;

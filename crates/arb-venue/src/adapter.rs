@@ -1,12 +1,13 @@
 //! Stage 1 + 2 read-side traits: what a venue can tell us.
 //!
-//! Five methods. Each returns owned, already-validated `arb-types` values with
-//! provenance attached, so a caller can never accidentally consume a raw wire
-//! number.
+//! Seven methods, five required. Each returns owned, already-validated
+//! `arb-types` values with provenance attached, so a caller can never
+//! accidentally consume a raw wire number.
 
 use arb_num::{Bps, NumError};
 use arb_types::{
-    BookSnapshot, FundingSnapshot, Instrument, InstrumentKey, QualityFlags, Venue,
+    BookSnapshot, BorrowSnapshot, FundingSnapshot, Instrument, InstrumentKey, QualityFlags,
+    RateHistory, Venue,
 };
 
 use crate::error::VenueError;
@@ -50,6 +51,58 @@ pub trait ExchangeAdapter {
 
     /// Maker/taker fees for this instrument.
     fn fee_schedule(&self, key: &InstrumentKey) -> Result<FeeSchedule, VenueError>;
+
+    /// What it costs to borrow the base asset at this venue, if we know.
+    ///
+    /// `Ok(None)` means **we have no quote**, and it is the answer this method is
+    /// expected to give until an authenticated margin endpoint is wired up. It is
+    /// not a synonym for free: `arb_scan::scan::price_pair` turns `None` on a
+    /// short spot leg into `QualityFlags::BORROW_COST_UNKNOWN` and blocks the row,
+    /// while a `BorrowSnapshot` with a zero rate says the borrow is genuinely
+    /// free and lets the row rank. An implementation that returns
+    /// `Ok(Some(rate 0))` for "unknown" therefore converts a blocked row into a
+    /// ranked one, which is the single worst edit available in this trait: CEX
+    /// margin borrow annualises into the tens of percent against an edge of twelve
+    /// basis points, so it can invert the sign of the printed number.
+    ///
+    /// # Why this has a default body
+    ///
+    /// Three types implement this trait, two of them in `arb-live`, and a
+    /// required method would break them the moment this one was added. The
+    /// default answers **absent**, which is the blocking, conservative direction:
+    /// an adapter that has not thought about borrow costs yet reports that it has
+    /// no idea, and the rows that need one stay blocked. A default of "free" would
+    /// have been unsafe; a default of "unknown" cannot be.
+    ///
+    /// Only spot instruments have a borrow leg. A short perp posts margin and
+    /// borrows nothing, so `Ok(None)` for a perp is correct rather than
+    /// incomplete.
+    fn borrow(&self, key: &InstrumentKey) -> Result<Option<BorrowSnapshot>, VenueError> {
+        let _ = key;
+        Ok(None)
+    }
+
+    /// Funding rates that actually settled for this instrument, oldest first.
+    ///
+    /// `Ok(None)` means we asked nobody; `Ok(Some(history))` with an empty series
+    /// means the venue published none. Both raise
+    /// `QualityFlags::RATE_HISTORY_MISSING`, which warns rather than blocks
+    /// (`OPEN.md` A5): without a history the printed APR is a conditional — "this
+    /// is the return *if* the rate holds" — and a conditional stated as such is
+    /// honestly useful, where one presented as a forecast is not.
+    ///
+    /// Entries must be rates that **settled**, never the venue's predicted next
+    /// rate. `arb_types::RateHistory` documents why: a series of revised forecasts
+    /// is smoother than the realised sequence, so mixing them makes persistence
+    /// look better than it was, and persistence is what decides whether a
+    /// twenty-two-period breakeven is reachable.
+    ///
+    /// Has a default body for the same reason as [`ExchangeAdapter::borrow`], and
+    /// with the same direction: absent, not empty-and-fine.
+    fn rate_history(&self, key: &InstrumentKey) -> Result<Option<RateHistory>, VenueError> {
+        let _ = key;
+        Ok(None)
+    }
 }
 
 /// Maker and taker fee for one instrument, plus whether we actually know the

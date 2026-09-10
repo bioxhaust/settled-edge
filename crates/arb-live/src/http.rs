@@ -114,6 +114,23 @@ pub enum HttpError {
     /// requires to be UTF-8, so this is corruption rather than a variant to
     /// support.
     NotUtf8,
+    /// The response arrived but could not be *recorded*, so it was refused.
+    ///
+    /// Produced only by [`crate::record::Recorder`], for exactly two causes: the
+    /// local clock could not be read, or the journal could not be written. Both
+    /// mean the same thing — there is a response and no honest way to mark when it
+    /// was observed — and in both cases the request fails rather than the frame
+    /// being written blind or dropped.
+    ///
+    /// The alternative was to hand the body back and carry on with the journal
+    /// silently short. That is worse in the specific way this project cares about:
+    /// a recording is evidence, and a recording with holes in it that nobody was
+    /// told about is evidence of the wrong thing. Failing the request costs one
+    /// instrument on one scan and says so in the report.
+    NotRecorded {
+        /// What stopped the frame from being written.
+        detail: String,
+    },
 }
 
 impl fmt::Display for HttpError {
@@ -137,6 +154,9 @@ impl fmt::Display for HttpError {
                 f.write_str("curl output did not carry a status line")
             }
             HttpError::NotUtf8 => f.write_str("response body was not valid UTF-8"),
+            HttpError::NotRecorded { detail } => {
+                write!(f, "the observation could not be recorded: {detail}")
+            }
         }
     }
 }
@@ -147,8 +167,16 @@ impl std::error::Error for HttpError {}
 ///
 /// The seam that lets every adapter be tested without a network. A real scan
 /// uses [`CurlTransport`]; the test suite uses [`StubTransport`] loaded with
-/// payloads captured from the live endpoints, so an adapter's parsing is proven
-/// against the bytes a venue actually sends while remaining a pure unit test.
+/// recorded payloads, so an adapter's parsing is proven against a fixed body
+/// while remaining a pure unit test.
+///
+/// **How strong that proof is depends entirely on where the body came from**, and
+/// that varies by venue: see the provenance headers on
+/// [`crate::venues::bybit::captured`] and [`crate::venues::okx::captured`]. Against
+/// bytes a venue really sent, this proves parsing. Against a shape written from
+/// recollection, it proves only self-consistency — worth having, because it makes
+/// the parse deterministic and makes a renamed field fail loudly, but it is not a
+/// measurement and this seam cannot tell the difference.
 pub trait Transport {
     /// Fetch `url` and return the body.
     ///
@@ -373,9 +401,10 @@ impl Transport for CurlTransport {
 
 /// A [`Transport`] that answers from a fixed table, for tests.
 ///
-/// Lets every adapter be tested against payloads captured from the live
-/// endpoints without a socket, so the test suite stays offline, deterministic and
-/// fast while still proving the parsing against real bytes.
+/// Lets every adapter be tested against a recorded payload without a socket, so the
+/// test suite stays offline, deterministic and fast. Whether that payload is a
+/// measurement or a recollection is a property of the fixture, not of this type —
+/// see the note on [`Transport`].
 #[derive(Debug, Clone, Default)]
 pub struct StubTransport {
     responses: Vec<(String, String)>,

@@ -19,6 +19,8 @@
 //! stray space means the adapter mis-sliced the payload, and we want that loud.
 
 use crate::error::NumError;
+use crate::muldiv::mul_div;
+use crate::round::RoundMode;
 
 /// `10^n` as `i128`, or `None` if it does not fit.
 pub fn pow10_i128(n: u32) -> Option<i128> {
@@ -51,6 +53,57 @@ fn pow10_u128(n: u32) -> u128 {
 /// carries non-zero digits below the target scale. Trailing zeros are not
 /// precision: `"1.2500000000000000"` parses fine at scale 12.
 pub fn parse_scaled(s: &str, scale_digits: u32) -> Result<i128, NumError> {
+    parse_scaled_inner(s, scale_digits, None)
+}
+
+/// [`parse_scaled`], but rounding sub-scale digits instead of refusing them.
+///
+/// # When this is the right function, and when it hides a bug
+///
+/// Refusing to truncate is the correct default and stays the default: a price
+/// with more decimal places than [`crate::SCALE_DIGITS`] is far more likely to be
+/// a misread field — an interest rate parsed as a price, a payload whose units we
+/// misunderstood — than a genuinely finer price. `PrecisionLoss` catches that, and
+/// this function switches the catch off, so reaching for it needs a reason
+/// specific to the field being read.
+///
+/// The reason that exists today: **OKX publishes `fundingRate` to sixteen decimal
+/// places** (`"0.0000689368148824"`), and a funding rate really does carry
+/// meaningful digits that far down, because it is a ratio and not a quoted price.
+/// [факт, проверено — `/api/v5/public/funding-rate` прочитан живьём 2026-08-25]
+/// Four digits fall below scale 12, so [`parse_scaled`] rejects the venue's own
+/// number and the adapter can report no funding at all.
+///
+/// # The bound, stated rather than assumed away
+///
+/// At most half a unit in the last place is discarded: `5e-13` on the rate.
+/// Annualised over 1095 eight-hour periods that is `5.5e-10`, or `5.5e-8`
+/// percentage points of APR — six orders of magnitude below the twelve basis
+/// points of edge any threshold in this workspace is set against. It cannot move
+/// a ranking decision.
+///
+/// # Why the mode is a parameter with no default
+///
+/// Whether a funding rate is a cost or a revenue depends on which side the
+/// position takes, which a parser cannot know, so neither
+/// [`RoundMode::COST`] nor [`RoundMode::REVENUE`] is the conservative choice here.
+/// [`RoundMode::HalfEven`] is documented as the neutral mode for exactly this
+/// case and is what the OKX adapter passes; the parameter stays explicit so that a
+/// caller reading a one-directional field can still say so.
+pub fn parse_scaled_rounded(
+    s: &str,
+    scale_digits: u32,
+    mode: RoundMode,
+) -> Result<i128, NumError> {
+    parse_scaled_inner(s, scale_digits, Some(mode))
+}
+
+/// `mode: None` means refuse sub-scale digits; `Some` means round them.
+fn parse_scaled_inner(
+    s: &str,
+    scale_digits: u32,
+    mode: Option<RoundMode>,
+) -> Result<i128, NumError> {
     let b = s.as_bytes();
     if b.is_empty() {
         return Err(NumError::InvalidFormat);
@@ -162,15 +215,32 @@ pub fn parse_scaled(s: &str, scale_digits: u32) -> Result<i128, NumError> {
         Ok(if negative { -out } else { out })
     } else {
         let drop_digits = -shift;
+        // Refused in both modes. An input needing more than 38 digits of shift is
+        // outside this crate's range entirely, and flattening it to zero because a
+        // rounding mode was supplied would turn "I cannot represent this" into "the
+        // value is nothing".
         if drop_digits > 38 {
             return Err(NumError::PrecisionLoss);
         }
         let p = pow10_i128(drop_digits as u32).ok_or(NumError::Overflow)?;
-        if mag % p != 0 {
-            return Err(NumError::PrecisionLoss);
+        if mag % p == 0 {
+            let out = mag / p;
+            return Ok(if negative { -out } else { out });
         }
-        let out = mag / p;
-        Ok(if negative { -out } else { out })
+        // Sub-scale digits are present: strict mode refuses, rounding mode disposes
+        // of them in the direction the caller named.
+        //
+        // The sign is applied *before* the division, not after, because `Trunc`,
+        // `Floor` and `Ceil` are not sign-symmetric — `Floor` on a negative value
+        // must increase magnitude — and dividing an unsigned magnitude first would
+        // silently turn each of those modes into its mirror image.
+        let mode = mode.ok_or(NumError::PrecisionLoss)?;
+        let signed = if negative {
+            mag.checked_neg().ok_or(NumError::Overflow)?
+        } else {
+            mag
+        };
+        mul_div(signed, 1, p, mode)
     }
 }
 
@@ -415,5 +485,138 @@ mod tests {
         assert_eq!(pow10_i128(12), Some(1_000_000_000_000));
         assert!(pow10_i128(38).is_some());
         assert_eq!(pow10_i128(39), None);
+    }
+
+    /// OKX's real `fundingRate`, which scale 12 cannot hold.
+    ///
+    /// Sixteen decimal places, the last four of them below scale. This exact
+    /// string is what `/api/v5/public/funding-rate` returned on 2026-08-25, and
+    /// it is why [`parse_scaled_rounded`] exists at all: without it the strict
+    /// parser refuses the venue's own number and the OKX adapter can report no
+    /// funding rate whatsoever.
+    const OKX_FUNDING_RATE: &str = "0.0000689368148824";
+
+    #[test]
+    fn a_venue_rate_below_scale_is_refused_strictly_and_rounded_only_on_request() {
+        // The strict parser rejects it, and that rejection is the default that
+        // catches misidentified fields elsewhere.
+        assert_eq!(parse_scaled(OKX_FUNDING_RATE, S), Err(NumError::PrecisionLoss));
+
+        // 689368148824 / 10^4 = 68936814 remainder 8824. The remainder is more
+        // than half of 10^4, so nearest rounds up.
+        assert_eq!(
+            parse_scaled_rounded(OKX_FUNDING_RATE, S, RoundMode::HalfEven),
+            Ok(68_936_815)
+        );
+        assert_eq!(
+            parse_scaled_rounded(OKX_FUNDING_RATE, S, RoundMode::Trunc),
+            Ok(68_936_814)
+        );
+        assert_eq!(
+            parse_scaled_rounded(OKX_FUNDING_RATE, S, RoundMode::AwayFromZero),
+            Ok(68_936_815)
+        );
+
+        // The discarded amount, in the units the docs quote a bound in: under one
+        // unit in the last place, i.e. below 1e-12 on the rate.
+        let exact_upper = parse_scaled_rounded(OKX_FUNDING_RATE, S, RoundMode::Ceil)
+            .expect("ceil");
+        let exact_lower = parse_scaled_rounded(OKX_FUNDING_RATE, S, RoundMode::Floor)
+            .expect("floor");
+        assert_eq!(exact_upper - exact_lower, 1);
+    }
+
+    #[test]
+    fn the_sign_is_applied_before_the_division_so_directional_modes_are_not_mirrored() {
+        // The bug this guards: dividing an unsigned magnitude and negating after
+        // would make `Floor` behave like `Ceil` on every negative rate. Funding
+        // rates are negative about half the time, so the mirror would be live.
+        let negative = "-0.0000689368148824";
+
+        // Toward zero: magnitude decreases, on both signs.
+        assert_eq!(parse_scaled_rounded(negative, S, RoundMode::Trunc), Ok(-68_936_814));
+        // Toward negative infinity: magnitude *increases* on a negative value.
+        assert_eq!(parse_scaled_rounded(negative, S, RoundMode::Floor), Ok(-68_936_815));
+        // Toward positive infinity: magnitude decreases on a negative value.
+        assert_eq!(parse_scaled_rounded(negative, S, RoundMode::Ceil), Ok(-68_936_814));
+        // Away from zero: magnitude increases, on both signs.
+        assert_eq!(
+            parse_scaled_rounded(negative, S, RoundMode::AwayFromZero),
+            Ok(-68_936_815)
+        );
+
+        // And each mode is the exact negation of its mirror on the positive input,
+        // which is the property a sign-after-division implementation would break.
+        for (mode, mirror) in [
+            (RoundMode::Floor, RoundMode::Ceil),
+            (RoundMode::Ceil, RoundMode::Floor),
+            (RoundMode::Trunc, RoundMode::Trunc),
+            (RoundMode::AwayFromZero, RoundMode::AwayFromZero),
+            (RoundMode::HalfEven, RoundMode::HalfEven),
+        ] {
+            let neg = parse_scaled_rounded(negative, S, mode).expect("negative");
+            let pos = parse_scaled_rounded(OKX_FUNDING_RATE, S, mirror).expect("positive");
+            assert_eq!(neg, -pos, "{mode:?} is not the mirror of {mirror:?}");
+        }
+    }
+
+    #[test]
+    fn rounding_changes_nothing_when_the_input_already_fits() {
+        // Every value the strict parser accepts must parse identically under every
+        // mode, or the rounding path would be silently altering exact data.
+        for input in ["0", "1.25", "-1.25", "78992.6", "0.00007087", "1.250000000000", "8.12e-9"] {
+            let strict = parse_scaled(input, S).expect(input);
+            for mode in [
+                RoundMode::Trunc,
+                RoundMode::Floor,
+                RoundMode::Ceil,
+                RoundMode::AwayFromZero,
+                RoundMode::HalfEven,
+            ] {
+                assert_eq!(
+                    parse_scaled_rounded(input, S, mode),
+                    Ok(strict),
+                    "{input} changed under {mode:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn half_even_breaks_ties_toward_the_even_result() {
+        // Exactly half a unit in the last place, both directions.
+        assert_eq!(
+            parse_scaled_rounded("0.0000000000005", S, RoundMode::HalfEven),
+            Ok(0),
+            "0.5 ulp with an even neighbour rounds down"
+        );
+        assert_eq!(
+            parse_scaled_rounded("0.0000000000015", S, RoundMode::HalfEven),
+            Ok(2),
+            "1.5 ulp with an odd neighbour rounds up"
+        );
+    }
+
+    #[test]
+    fn a_value_far_below_scale_is_refused_even_with_a_rounding_mode() {
+        // Beyond 38 digits of shift the answer is not "zero", it is "outside this
+        // crate's range", and a rounding mode must not convert one into the other.
+        assert_eq!(
+            parse_scaled_rounded("1e-51", S, RoundMode::HalfEven),
+            Err(NumError::PrecisionLoss)
+        );
+        assert_eq!(parse_scaled("1e-51", S), Err(NumError::PrecisionLoss));
+    }
+
+    #[test]
+    fn a_rounding_mode_does_not_excuse_malformed_input() {
+        // The grammar is unchanged: rounding disposes of digits below scale, it
+        // does not make a garbage string parse.
+        for bad in ["", " 1.5", "1.5 ", "1..5", "abc", "1.2.3"] {
+            assert!(
+                parse_scaled_rounded(bad, S, RoundMode::HalfEven).is_err(),
+                "should have refused {bad:?}"
+            );
+        }
     }
 }

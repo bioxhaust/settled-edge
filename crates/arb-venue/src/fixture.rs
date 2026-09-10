@@ -43,6 +43,43 @@
 //! ask = 68123.5 x 1.2
 //! ```
 //!
+//! Two further sections are optional and appear on no shipped fixture. On a
+//! **spot** instrument, `[borrow]` states what it costs to borrow the base asset
+//! in order to sell it short:
+//!
+//! ```text
+//! [borrow]
+//! asset = BTC
+//! rate = 0.0000125
+//! interval_secs = 3600
+//! exchange_ts = 1735660800000
+//! ```
+//!
+//! On a **perpetual**, `[history]` lists funding rates that actually settled,
+//! oldest first:
+//!
+//! ```text
+//! [history]
+//! settled = 1735632000000 x 0.00011
+//! settled = 1735660800000 x 0.00009
+//! ```
+//!
+//! # Why no shipped fixture carries either of them
+//!
+//! Because nobody measured them. Every reverse-carry row in `replay fixtures/`
+//! is therefore blocked with `BORROW_COST_UNKNOWN`, and every funding row is
+//! flagged `RATE_HISTORY_MISSING`. That is the product working: a CEX margin
+//! borrow annualises into the tens of percent against an edge of twelve basis
+//! points, so a borrow rate invented to unblock a row would not be an
+//! approximation, it would be the row's entire verdict (`OPEN.md` A1 and A5,
+//! charter section 9). The format exists so that the day recorded numbers arrive
+//! they need no code change — not so that the blocked rows can be made to look
+//! answered tonight.
+//!
+//! `fixtures/format-demo/` proves the two sections parse. It is a
+//! subdirectory, which `FixtureAdapter::load_dir` skips by design, so it cannot
+//! reach `replay` and cannot change one number any other crate's tests read.
+//!
 //! # Everything here is strict on purpose
 //!
 //! An unknown key is an error, not a warning. A duplicate key is an error. A
@@ -67,9 +104,9 @@
 
 use arb_num::{Bps, Money, Price, Qty, Rate};
 use arb_types::{
-    Asset, BookSnapshot, ContractSize, ContractSpec, DataQuality, FundingInterval,
-    FundingSnapshot, Instrument, InstrumentKey, Level, LocalTs, MarketKind, QualityFlags, SizeUnit,
-    Symbol, Venue, VenueKey, WallTs,
+    Asset, BookSnapshot, BorrowInterval, BorrowSnapshot, ContractSize, ContractSpec, DataQuality,
+    FundingInterval, FundingSnapshot, Instrument, InstrumentKey, Level, LocalTs, MarketKind,
+    QualityFlags, RateHistory, SettledRate, SizeUnit, Symbol, TypeError, Venue, VenueKey, WallTs,
 };
 
 use crate::adapter::FeeSchedule;
@@ -173,6 +210,42 @@ impl FundingFixture {
     }
 }
 
+/// The `[borrow]` section, before it becomes a [`BorrowSnapshot`].
+///
+/// A separate type for the same reason as [`FundingFixture`]: a snapshot needs an
+/// `observed_at` on our clock and the file has no opinion about when we read it.
+///
+/// # Why `interval_secs` is required with no default
+///
+/// The two conventions among the venues in scope are hourly (Binance-style margin
+/// interest) and daily, and they differ by **exactly 24x**. A default would pick
+/// one, and the half of the time it picked wrong in the understating direction it
+/// would paint an opportunity: a 24x-too-small borrow cost turns a reverse carry
+/// that loses money into the best row in the table. Ranking selects for
+/// favourable error, so the field is mandatory and a file that omits it fails
+/// with [`ParseReason::MissingKey`].
+///
+/// A quality flag was considered instead and rejected: `arb_scan::LegInput`'s
+/// `quality()` folds book, fee and funding quality only, so a flag set inside a
+/// borrow snapshot's own [`DataQuality`] would never reach a report row. A
+/// decorative flag is worse than a mandatory field, because it looks like a
+/// check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BorrowFixture {
+    /// The asset being borrowed. Must be the instrument's base: shorting
+    /// BTC/USDT means borrowing BTC in order to sell it, and
+    /// `arb_scan::LegInput` refuses any other asset with an error that kills the
+    /// whole leg.
+    pub asset: Asset,
+    /// Interest accrued over one `interval`, as a fraction of principal.
+    /// Non-negative — see [`parse_fixture`].
+    pub rate: Rate,
+    /// The accrual period `rate` is quoted per.
+    pub interval: BorrowInterval,
+    /// The venue's own timestamp on this payload, where the file supplied one.
+    pub exchange_ts: Option<WallTs>,
+}
+
 /// One parsed fixture file: one instrument at one venue.
 ///
 /// Holds the raw levels rather than a [`BookSnapshot`] because a snapshot needs
@@ -189,6 +262,20 @@ pub struct FixtureRecord {
     /// Maker/taker fees. Always [`FeeSchedule::assumed`] — see
     /// [`parse_fixture`].
     pub fees: FeeSchedule,
+    /// `None` when the file has no `[borrow]`, which is every shipped fixture.
+    ///
+    /// `None` on a spot leg that ends up short is what blocks a reverse-carry row
+    /// with `BORROW_COST_UNKNOWN`, and that block is the honest answer, not a
+    /// gap to be filled (`OPEN.md` A1).
+    pub borrow: Option<BorrowFixture>,
+    /// Settled funding rates, oldest first. `None` when the file has no
+    /// `[history]`, which is every shipped fixture.
+    ///
+    /// `Some` with an empty series is a different statement — "this venue
+    /// published none" — and is legal, because a newly listed perp really has no
+    /// settled rates. Both raise `RATE_HISTORY_MISSING` downstream; only the
+    /// first means nobody asked.
+    pub history: Option<RateHistory>,
     /// Bid levels, strictly descending. Empty when the file has no `[book]`.
     pub bids: Vec<Level>,
     /// Ask levels, strictly ascending. Empty when the file has no `[book]`.
@@ -238,6 +325,51 @@ impl FixtureRecord {
                 .with_flags(f.flags())
                 .with_flags(self.fees.flags()),
         })
+    }
+
+    /// The borrow snapshot, when the file carried a `[borrow]` section.
+    ///
+    /// `Ok(None)` and not an error: "this venue quoted us no borrow rate" is a
+    /// legitimate answer that must arrive intact, because it is what raises
+    /// `BORROW_COST_UNKNOWN` and blocks the row. Returning
+    /// [`VenueError::Unsupported`] instead would abort the whole leg, and a leg
+    /// that failed to assemble is invisible in the report — the opposite of the
+    /// loud block this absence is supposed to produce.
+    ///
+    /// `observed_at` is ours to supply because the file cannot know it. The
+    /// `Result` covers [`BorrowSnapshot::new`]'s refusal of a negative rate,
+    /// which [`parse_fixture`] has already rejected with a line number; the arm
+    /// is kept rather than unwrapped because a constructor's invariant is not
+    /// this function's to assume.
+    pub fn borrow_snapshot(
+        &self,
+        observed_at: LocalTs,
+    ) -> Result<Option<BorrowSnapshot>, VenueError> {
+        let b = match &self.borrow {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        BorrowSnapshot::new(
+            self.instrument.vkey,
+            b.asset,
+            b.rate,
+            b.interval,
+            b.exchange_ts,
+            observed_at,
+            synthesized(),
+        )
+        .map(Some)
+        .map_err(VenueError::from)
+    }
+
+    /// The settled-rate history, when the file carried a `[history]` section.
+    ///
+    /// Cloned rather than borrowed because `arb_scan::LegInput` owns its history,
+    /// and no `observed_at` appears here: a settled rate is stamped by the venue
+    /// at the moment money moved, and re-stamping it with our clock would make
+    /// the series say when we read it instead of when it happened.
+    pub fn rate_history(&self) -> Option<RateHistory> {
+        self.history.clone()
     }
 
     /// Build a book snapshot of at most `depth` levels per side.
@@ -307,7 +439,14 @@ struct Section {
 }
 
 /// The sections this parser knows. Anything else is an error, not a comment.
-const KNOWN_SECTIONS: [&str; 4] = ["instrument", "funding", "fees", "book"];
+const KNOWN_SECTIONS: [&str; 6] = [
+    "instrument",
+    "funding",
+    "fees",
+    "book",
+    "borrow",
+    "history",
+];
 
 impl Section {
     /// Remove and return a key, if present.
@@ -485,6 +624,34 @@ fn as_level(e: &Entry) -> Result<Level, VenueError> {
         .map_err(|t| VenueError::parse(e.line, ParseReason::Type(t)))
 }
 
+/// `TIMESTAMP_MS x RATE`.
+///
+/// The same ` x ` separator as a book level, and reusing it is the point: one
+/// separator to learn, and a `settled` line that a reader can scan the same way
+/// they scan a ladder. The timestamp comes first because the series is ordered by
+/// it, and an ordering key buried on the right of a line is one a reader checks
+/// last.
+fn as_settled_rate(e: &Entry) -> Result<SettledRate, VenueError> {
+    let (t, r) = e
+        .value
+        .split_once('x')
+        .ok_or_else(|| VenueError::parse(e.line, ParseReason::BadSettledRate(e.value.clone())))?;
+    let te = Entry {
+        key: e.key.clone(),
+        value: t.trim().to_string(),
+        line: e.line,
+    };
+    let re = Entry {
+        key: e.key.clone(),
+        value: r.trim().to_string(),
+        line: e.line,
+    };
+    Ok(SettledRate {
+        settled_at: WallTs::from_millis(as_i64("settled", &te)?),
+        rate: as_rate(&re)?,
+    })
+}
+
 /// Parse one fixture file.
 ///
 /// Pure: give it a `&str` and it needs no filesystem. Every error carries the
@@ -576,10 +743,18 @@ pub fn parse_fixture(text: &str) -> Result<FixtureRecord, VenueError> {
                 venue_entry = Some(entry);
             }
             Some(i) => {
-                // `bid` and `ask` are the only repeatable keys. Everything else
-                // duplicated is two people editing the same fixture and neither
-                // noticing the other, which last-write-wins would hide.
-                let repeatable = key == "bid" || key == "ask";
+                // `bid`, `ask` and `settled` are the only repeatable keys, and
+                // each is repeatable because it is one element of a list. A book
+                // is a ladder and a history is a series; everything else is a
+                // single value, and everything else duplicated is two people
+                // editing the same fixture and neither noticing the other, which
+                // last-write-wins would hide.
+                //
+                // Deliberately not scoped per section: a `settled` line inside
+                // `[book]` is an unknown key there and `Section::finish` says so,
+                // which is a better error than a duplicate-key complaint about a
+                // key that does not belong in that section at all.
+                let repeatable = key == "bid" || key == "ask" || key == "settled";
                 if !repeatable && sections[i].entries.iter().any(|e| e.key == key) {
                     return Err(VenueError::parse(
                         line,
@@ -624,6 +799,8 @@ fn build(
     let mut fees = take_section(&mut sections, "fees")
         .ok_or_else(|| VenueError::parse(last_line, ParseReason::MissingSection("fees")))?;
     let funding = take_section(&mut sections, "funding");
+    let borrow = take_section(&mut sections, "borrow");
+    let history = take_section(&mut sections, "history");
     let book = take_section(&mut sections, "book");
 
     // ---- [instrument] -----------------------------------------------------
@@ -642,7 +819,8 @@ fn build(
     // Required, never inferred: see `as_size_unit`. A file that omits it fails
     // with `MissingKey`, which is the point — the old parser inferred the unit
     // from `contract_size` and was right only by luck on Binance.
-    let size_unit = as_size_unit(&instrument.require("size_unit")?)?;
+    let size_unit_entry = instrument.require("size_unit")?;
+    let size_unit = as_size_unit(&size_unit_entry)?;
     let lot_size = as_qty(&instrument.require("lot_size")?)?;
     let min_notional = match instrument.take("min_notional") {
         Some(e) => Some(as_money(&e)?),
@@ -654,6 +832,40 @@ fn build(
     // `kind`, and that is the 68,000x error.
     let spec = ContractSpec::new(kind, size, settle, tick_size, size_unit, lot_size, min_notional)
         .map_err(|t| VenueError::parse(size_entry.line, ParseReason::Type(t)))?;
+
+    // A declared `size_unit` that contradicts the one `contract_size` implies is
+    // refused *here* and not in `ContractSpec::validate`, which deliberately
+    // permits it (`decisions/024`, `OPEN.md` D5). The split is not a compromise,
+    // it is the difference between the two callers: a live adapter reports two
+    // fields a venue really sent, and a disagreement between them is a signal
+    // about the payload worth keeping, while a fixture is one hand-written file
+    // about one instrument and a disagreement inside it has no second reading.
+    //
+    // Refusing it costs nothing today: all sixteen shipped fixtures agree, and
+    // `load_dir` parsing all of them is the test of that.
+    //
+    // Why refuse rather than flag: the contradiction is currently **silent**.
+    // Nothing in the workspace dispatches arithmetic on `size_unit` — `arb_scan`
+    // branches on `ContractSize`, which is exactly what `implied_by` reads — so
+    // the only consumer of the declared field is the unit `arb-engine` prints. A
+    // self-contradictory fixture therefore prints one unit and computes in the
+    // other, and a quality flag on a row nothing blocks would not stop it. The day
+    // `arb-scan` does dispatch on `size_unit`, this becomes a flag on a real
+    // divergence; the fix is never to loosen it here first.
+    //
+    // Ordered after `ContractSpec::new` on purpose: a `quote:` size on a linear
+    // market is the ~68,000x error and must keep reporting as itself, not as a
+    // unit contradiction that happens to travel with it.
+    let implied = SizeUnit::implied_by(size);
+    if size_unit != implied {
+        return Err(VenueError::parse(
+            size_unit_entry.line,
+            ParseReason::SizeUnitContradiction {
+                declared: size_unit.as_str(),
+                implied: implied.as_str(),
+            },
+        ));
+    }
     instrument.finish()?;
 
     let key = InstrumentKey::new(base, quote, kind, settle);
@@ -758,6 +970,136 @@ fn build(
         }
     };
 
+    // ---- [borrow] ---------------------------------------------------------
+
+    let borrow = match borrow {
+        Some(mut section) => {
+            if kind.is_perp() {
+                // See `ParseReason::BorrowOnPerp`. Checked before any field is
+                // read so that a `[borrow]` block on a perp fails for the reason
+                // it is wrong, not for whichever key it happens to misspell.
+                return Err(VenueError::parse(
+                    section.header_line,
+                    ParseReason::BorrowOnPerp,
+                ));
+            }
+            let asset_entry = section.require("asset")?;
+            let asset = as_asset(&asset_entry)?;
+            if asset != base {
+                return Err(VenueError::parse(
+                    asset_entry.line,
+                    ParseReason::BorrowAssetNotBase {
+                        found: asset.as_str().to_string(),
+                        base: base.as_str().to_string(),
+                    },
+                ));
+            }
+            let rate_entry = section.require("rate")?;
+            let rate = as_rate(&rate_entry)?;
+            // `BorrowSnapshot::new` refuses a negative rate, and would refuse it
+            // again in `borrow_snapshot`. It is refused here as well so the
+            // engineer gets a line number: a negative borrow enters a net-APR sum
+            // as *revenue*, so the row it belongs to ranks above honest rows on
+            // income no venue pays.
+            if rate.is_negative() {
+                return Err(VenueError::parse(
+                    rate_entry.line,
+                    ParseReason::Type(TypeError::NegativeBorrowRate),
+                ));
+            }
+            let secs_entry = section.require("interval_secs")?;
+            let secs_u64 = as_u64("interval_secs", &secs_entry)?;
+            let secs = u32::try_from(secs_u64).map_err(|_| {
+                VenueError::parse(
+                    secs_entry.line,
+                    ParseReason::BadInteger {
+                        field: "interval_secs",
+                        value: secs_entry.value.clone(),
+                    },
+                )
+            })?;
+            let interval = BorrowInterval::from_secs(secs)
+                .map_err(|t| VenueError::parse(secs_entry.line, ParseReason::Type(t)))?;
+            let exchange_ts = match section.take("exchange_ts") {
+                Some(e) => Some(WallTs::from_millis(as_i64("exchange_ts", &e)?)),
+                None => None,
+            };
+            section.finish()?;
+            Some(BorrowFixture {
+                asset,
+                rate,
+                interval,
+                exchange_ts,
+            })
+        }
+        // No section means no quote, which blocks the row. There is deliberately
+        // no `if kind == Spot { require it }` arm here to mirror the perp/funding
+        // rule: a spot instrument we never asked about a borrow for is the normal
+        // state of this directory, and demanding the section would force every
+        // spot fixture to invent a number.
+        None => None,
+    };
+
+    // ---- [history] --------------------------------------------------------
+
+    let history = match history {
+        Some(mut section) => {
+            if kind == MarketKind::Spot {
+                return Err(VenueError::parse(
+                    section.header_line,
+                    ParseReason::HistoryOnSpot,
+                ));
+            }
+            // File order is the series order, oldest first, and it is preserved
+            // rather than sorted. Sorting would silently repair a file that lists
+            // its settlements backwards, and a fixture that cannot say which
+            // settlement came first cannot say anything about persistence.
+            let header_line = section.header_line;
+            let mut entries: Vec<SettledRate> = Vec::new();
+            for e in section.drain_repeated("settled") {
+                let settled = as_settled_rate(&e)?;
+                if let Some(prev) = entries.last() {
+                    if prev.settled_at >= settled.settled_at {
+                        // `RateHistory::new` enforces this too, but it cannot say
+                        // which line, and "unsorted history" without a line number
+                        // in a nine-entry series is a hunt.
+                        return Err(VenueError::parse(
+                            e.line,
+                            ParseReason::Type(TypeError::UnsortedRateHistory),
+                        ));
+                    }
+                }
+                // A settled rate is money that already moved. One stamped at or
+                // after the next settlement is a *forecast*, and a series with a
+                // forecast in it makes persistence look better than it was —
+                // which is the one thing `RateHistory` exists to prevent.
+                if let Some(f) = &funding {
+                    if let Some(next) = f.next_funding_at {
+                        if settled.settled_at >= next {
+                            return Err(VenueError::parse(
+                                e.line,
+                                ParseReason::SettledRateNotInThePast {
+                                    settled_at: settled.settled_at.millis(),
+                                    next_funding_at: next.millis(),
+                                },
+                            ));
+                        }
+                    }
+                }
+                entries.push(settled);
+            }
+            section.finish()?;
+            // An empty `[history]` is legal and means "the venue published none".
+            // It still raises `RATE_HISTORY_MISSING` downstream, so it buys no
+            // row anything; what it buys is the ability to say so explicitly.
+            Some(
+                RateHistory::new(vkey, entries, synthesized())
+                    .map_err(|t| VenueError::parse(header_line, ParseReason::Type(t)))?,
+            )
+        }
+        None => None,
+    };
+
     // ---- [book] -----------------------------------------------------------
 
     let (bids, asks, book_sequence, book_exchange_ts, has_book) = match book {
@@ -797,6 +1139,8 @@ fn build(
         instrument,
         funding,
         fees: fee_schedule,
+        borrow,
+        history,
         bids,
         asks,
         book_sequence,
@@ -1231,18 +1575,36 @@ ask = 3820.34 x 2.0
     }
 
     #[test]
-    fn bid_and_ask_are_the_only_repeatable_keys() {
-        // A book is a list; everything else is a single value. This is asserted
-        // rather than assumed because the repeatability check is a two-name
-        // allowlist and adding a third name by accident would silently permit a
-        // duplicated `rate`.
+    fn book_levels_and_settled_rates_are_the_only_repeatable_keys() {
+        // A book is a ladder and a history is a series; everything else is a single
+        // value. This is asserted rather than assumed because the repeatability
+        // check is a three-name allowlist and adding a fourth name by accident
+        // would silently permit a duplicated `rate`.
         let with_levels = LINEAR.replacen("ask = 68124.0 x 2.5", "ask = 68124.0 x 2.5\nask = 68125.0 x 1.0", 1);
         assert_eq!(ok(&with_levels).asks.len(), 3);
 
-        let with_seq = LINEAR.replacen("sequence = 12345", "sequence = 12345\nsequence = 12346", 1);
+        let with_seq = LINEAR.replacen("sequence = 12345", "sequence = 12346\nsequence = 12345", 1);
         assert_eq!(
             fail(&with_seq).1,
             ParseReason::DuplicateKey(String::from("sequence"))
+        );
+
+        // `settled` is the third name, and `rate` inside `[borrow]` is not: a
+        // duplicated borrow rate is two people editing one fixture, and
+        // last-write-wins would hide it.
+        let with_rates = format!(
+            "{LINEAR}\n[history]\nsettled = 1735603200000 x 0.00012\nsettled = 1735632000000 x 0.00011\n"
+        );
+        assert_eq!(ok(&with_rates).rate_history().map(|h| h.len()), Some(2));
+
+        let dup_borrow = format!("{SPOT}\n{SPOT_BORROW}").replacen(
+            "rate = 0.0000125",
+            "rate = 0.0000125\nrate = 0.0000250",
+            1,
+        );
+        assert_eq!(
+            fail(&dup_borrow).1,
+            ParseReason::DuplicateKey(String::from("rate"))
         );
     }
 
@@ -1722,6 +2084,399 @@ ask = 3820.34 x 2.0
         // whole class of nondeterminism in the replay harness.
         assert_eq!(ok(LINEAR), ok(LINEAR));
         assert_ne!(ok(LINEAR), ok(INVERSE));
+    }
+
+    // -----------------------------------------------------------------------
+    // [borrow] — the section that decides whether a reverse carry is priced
+    // -----------------------------------------------------------------------
+
+    /// `SPOT` plus a borrow quote. Hourly, because Binance-style margin interest
+    /// accrues hourly and the daily convention is the other one; the two differ by
+    /// exactly 24x, which is why the field is in the file and not in a default.
+    const SPOT_BORROW: &str = "\
+[borrow]
+asset = ETH
+rate = 0.0000125
+interval_secs = 3600
+exchange_ts = 1735660800000
+";
+
+    /// `LINEAR` plus three settled rates, oldest first, all before the file's
+    /// `next_funding_at = 1735689600000`.
+    const LINEAR_HISTORY: &str = "\
+[history]
+settled = 1735603200000 x 0.00012
+settled = 1735632000000 x 0.00011
+settled = 1735660800000 x 0.00009
+";
+
+    fn spot_with_borrow() -> String {
+        format!("{SPOT}\n{SPOT_BORROW}")
+    }
+
+    fn linear_with_history() -> String {
+        format!("{LINEAR}\n{LINEAR_HISTORY}")
+    }
+
+    #[test]
+    fn a_spot_fixture_with_a_borrow_section_parses_every_field() {
+        let r = ok(&spot_with_borrow());
+        let b = match r.borrow {
+            Some(b) => b,
+            None => panic!("expected a [borrow] section to be read"),
+        };
+        assert_eq!(b.asset.as_str(), "ETH");
+        assert_eq!(b.rate, rate("0.0000125"));
+        assert_eq!(b.interval, BorrowInterval::HOURLY);
+        assert_eq!(b.exchange_ts, Some(WallTs::from_millis(1_735_660_800_000)));
+    }
+
+    #[test]
+    fn a_borrow_section_without_an_exchange_ts_still_parses() {
+        // The venue's stamp is the one optional field: a margin-interest endpoint
+        // that returns only a rate is a real shape, and refusing it would push a
+        // caller to invent a timestamp, which is worse than an absent one.
+        let text = spot_with_borrow().replacen("exchange_ts = 1735660800000\n", "", 1);
+        assert_eq!(ok(&text).borrow.map(|b| b.exchange_ts), Some(None));
+    }
+
+    #[test]
+    fn a_borrow_without_an_interval_is_a_missing_key_and_not_an_assumed_hour() {
+        // The 24x test. Hourly and daily are the two live conventions, so any
+        // default is wrong half the time, and the half where it understates paints
+        // an opportunity: a borrow cost 24x too small turns a losing reverse carry
+        // into the best row in the table. `MissingKey` is the only safe answer.
+        let text = spot_with_borrow().replacen("interval_secs = 3600\n", "", 1);
+        assert_eq!(
+            fail(&text).1,
+            ParseReason::MissingKey("interval_secs"),
+            "a missing accrual period must never be defaulted"
+        );
+    }
+
+    #[test]
+    fn a_borrow_section_on_a_perpetual_is_refused() {
+        // A short perp posts margin and borrows nothing, and `price_pair` never
+        // reads the field on a perp leg — so the block would look priced and price
+        // nothing. Mirror of `FundingOnSpot`.
+        let text = format!("{LINEAR}\n{SPOT_BORROW}").replacen("asset = ETH", "asset = BTC", 1);
+        let (line, reason) = fail(&text);
+        assert_eq!(reason, ParseReason::BorrowOnPerp);
+        // Reported against the section header, not against a field, because the
+        // section is what does not belong.
+        assert!(
+            text.lines().nth(line - 1) == Some("[borrow]"),
+            "line {line} should be the [borrow] header"
+        );
+    }
+
+    #[test]
+    fn a_borrow_asset_that_is_not_the_base_is_refused_at_parse_time() {
+        // `arb_scan::LegInput::assemble` answers this with `BorrowAssetMismatch`,
+        // which kills the whole leg and names no file. Catching it here turns that
+        // into a line number. Borrowing USDT to short ETH/USDT is not a smaller
+        // version of the right trade, it is the wrong asset: the cost is out by the
+        // price of ETH.
+        let text = spot_with_borrow().replacen("asset = ETH", "asset = USDT", 1);
+        assert_eq!(
+            fail(&text).1,
+            ParseReason::BorrowAssetNotBase {
+                found: String::from("USDT"),
+                base: String::from("ETH"),
+            }
+        );
+    }
+
+    #[test]
+    fn a_negative_borrow_rate_is_refused_with_the_line_that_wrote_it() {
+        // A negative borrow enters the net-APR sum as revenue, so the row ranks
+        // above honest rows on income no venue pays. `BorrowSnapshot::new` refuses
+        // it too; this refuses it earlier and says where.
+        let text = spot_with_borrow().replacen("rate = 0.0000125", "rate = -0.0000125", 1);
+        let (line, reason) = fail(&text);
+        assert_eq!(reason, ParseReason::Type(TypeError::NegativeBorrowRate));
+        assert_eq!(text.lines().nth(line - 1), Some("rate = -0.0000125"));
+    }
+
+    #[test]
+    fn a_zero_borrow_rate_is_accepted_and_is_not_the_same_as_unknown() {
+        // A fee-waived borrow is a real thing. Refusing zero would force callers to
+        // spell "free" as `None`, which then reads as "unknown" and blocks a row
+        // whose cost we actually know.
+        let text = spot_with_borrow().replacen("rate = 0.0000125", "rate = 0", 1);
+        let snap = match ok(&text).borrow_snapshot(LocalTs::EPOCH) {
+            Ok(Some(s)) => s,
+            other => panic!("expected a free borrow, got {other:?}"),
+        };
+        assert!(snap.is_free());
+        // And the distinction that matters downstream: free is `Some`, unknown is
+        // `None`, and only one of them blocks the row.
+        assert_eq!(ok(SPOT).borrow_snapshot(LocalTs::EPOCH), Ok(None));
+    }
+
+    #[test]
+    fn a_zero_borrow_interval_is_refused() {
+        // Divides by zero in every annualisation.
+        let text = spot_with_borrow().replacen("interval_secs = 3600", "interval_secs = 0", 1);
+        assert_eq!(
+            fail(&text).1,
+            ParseReason::Type(TypeError::ZeroBorrowInterval)
+        );
+    }
+
+    #[test]
+    fn a_record_with_no_borrow_section_answers_none_and_never_free() {
+        // The asymmetry this whole section exists for. `None` blocks the row with
+        // BORROW_COST_UNKNOWN; `Some(0)` ranks it. Every shipped fixture is the
+        // first case, and an adapter that "helpfully" upgraded one to the other
+        // would rank a reverse carry on a cost it never charged.
+        for text in [LINEAR, INVERSE, SPOT] {
+            assert_eq!(ok(text).borrow_snapshot(LocalTs::EPOCH), Ok(None));
+        }
+    }
+
+    #[test]
+    fn a_borrow_snapshot_carries_the_records_key_and_our_clock() {
+        // The vkey travels so a rate cannot be attached to the wrong venue —
+        // borrow rates differ by venue for the same asset — and `observed_at` is
+        // ours because the file cannot know it.
+        let r = ok(&spot_with_borrow());
+        let at = LocalTs::from_millis(1_735_660_900_000);
+        let snap = match r.borrow_snapshot(at) {
+            Ok(Some(s)) => s,
+            other => panic!("expected a snapshot, got {other:?}"),
+        };
+        assert_eq!(snap.vkey, r.instrument.vkey);
+        assert_eq!(snap.observed_at, at);
+        assert_eq!(snap.asset, r.key().base);
+        assert_eq!(snap.quality.provenance, Provenance::SynthesizedUnverified);
+    }
+
+    // -----------------------------------------------------------------------
+    // [history] — the section that says whether the rate has ever held
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_history_section_keeps_file_order_and_every_sign() {
+        let r = ok(&linear_with_history());
+        let h = match r.rate_history() {
+            Some(h) => h,
+            None => panic!("expected a [history] section to be read"),
+        };
+        assert_eq!(h.len(), 3);
+        assert_eq!(h.oldest().map(|s| s.rate), Some(rate("0.00012")));
+        assert_eq!(h.latest().map(|s| s.rate), Some(rate("0.00009")));
+        assert_eq!(
+            h.oldest().map(|s| s.settled_at),
+            Some(WallTs::from_millis(1_735_603_200_000))
+        );
+        assert_eq!(h.vkey, r.instrument.vkey);
+        assert_eq!(h.quality.provenance, Provenance::SynthesizedUnverified);
+    }
+
+    #[test]
+    fn a_history_of_negative_rates_keeps_them_negative() {
+        // A history whose signs were normalised away would make an inverted carry
+        // look like a persistent one. `current_sign_run` is the whole reason the
+        // series exists, and it reads signs.
+        let text = linear_with_history()
+            .replacen("x 0.00012", "x -0.00012", 1)
+            .replacen("x 0.00011", "x -0.00011", 1)
+            .replacen("x 0.00009", "x -0.00009", 1);
+        let h = match ok(&text).rate_history() {
+            Some(h) => h,
+            None => panic!("expected a history"),
+        };
+        assert_eq!(h.latest().map(|s| s.rate), Some(rate("-0.00009")));
+        assert_eq!(h.current_sign_run(), 3);
+    }
+
+    #[test]
+    fn an_empty_history_section_says_the_venue_published_none() {
+        // Legal, and different from an absent section: a newly listed perp really
+        // has no settled rates. Both raise RATE_HISTORY_MISSING downstream, so
+        // this buys the row nothing — it buys the file the ability to say so.
+        let text = format!("{LINEAR}\n[history]\n");
+        let h = match ok(&text).rate_history() {
+            Some(h) => h,
+            None => panic!("an empty [history] must still be Some"),
+        };
+        assert!(h.is_empty());
+        assert_eq!(ok(LINEAR).rate_history(), None, "absent is not empty");
+    }
+
+    #[test]
+    fn a_history_section_on_a_spot_instrument_is_refused() {
+        // The entries are settled *funding* rates and spot settles no funding.
+        let text = format!("{SPOT}\n{LINEAR_HISTORY}");
+        assert_eq!(fail(&text).1, ParseReason::HistoryOnSpot);
+    }
+
+    #[test]
+    fn a_history_out_of_order_names_the_line_that_broke_the_order() {
+        // File order is the series order and nothing sorts it: a fixture that
+        // cannot say which settlement came first cannot say anything about
+        // persistence, and silently repairing it would hide that.
+        let text = linear_with_history().replacen(
+            "settled = 1735632000000 x 0.00011",
+            "settled = 1735574400000 x 0.00011",
+            1,
+        );
+        let (line, reason) = fail(&text);
+        assert_eq!(reason, ParseReason::Type(TypeError::UnsortedRateHistory));
+        assert_eq!(
+            text.lines().nth(line - 1),
+            Some("settled = 1735574400000 x 0.00011")
+        );
+    }
+
+    #[test]
+    fn two_settlements_with_the_same_stamp_are_refused() {
+        // A venue settles once per interval, so a duplicate stamp means two
+        // payloads were merged or one was counted twice — and a double-counted
+        // period makes a run of agreement look one period longer than it was.
+        let text = linear_with_history().replacen(
+            "settled = 1735632000000 x 0.00011",
+            "settled = 1735603200000 x 0.00011",
+            1,
+        );
+        assert_eq!(
+            fail(&text).1,
+            ParseReason::Type(TypeError::UnsortedRateHistory)
+        );
+    }
+
+    #[test]
+    fn a_settled_rate_at_or_after_the_next_settlement_is_refused() {
+        // A settled rate is money that already moved. One stamped at or beyond
+        // `next_funding_at` is a forecast wearing a settled rate's clothes, and a
+        // series of forecasts is smoother than the realised one — so persistence
+        // would read better than it was. Both stamps come from the same file, so
+        // this check cannot produce a false positive.
+        let text = linear_with_history().replacen(
+            "settled = 1735660800000 x 0.00009",
+            "settled = 1735689600000 x 0.00009",
+            1,
+        );
+        assert_eq!(
+            fail(&text).1,
+            ParseReason::SettledRateNotInThePast {
+                settled_at: 1_735_689_600_000,
+                next_funding_at: 1_735_689_600_000,
+            }
+        );
+    }
+
+    #[test]
+    fn a_history_on_a_perp_with_no_next_funding_at_is_accepted() {
+        // `next_funding_at` is optional (INVERSE omits it). With nothing to compare
+        // against, the check is skipped rather than guessed at — inventing a next
+        // settlement in order to police the entries would be inventing the very
+        // kind of number this crate refuses.
+        let text = format!(
+            "{INVERSE}\n[history]\nsettled = 1735603200000 x -0.00005\nsettled = 1735632000000 x -0.00006\n"
+        );
+        assert_eq!(ok(&text).rate_history().map(|h| h.len()), Some(2));
+    }
+
+    #[test]
+    fn a_malformed_settled_line_is_an_error_and_not_a_skipped_entry() {
+        let text = linear_with_history()
+            .replacen("settled = 1735632000000 x 0.00011", "settled = 1735632000000", 1);
+        assert_eq!(
+            fail(&text).1,
+            ParseReason::BadSettledRate(String::from("1735632000000"))
+        );
+    }
+
+    #[test]
+    fn a_settled_timestamp_is_read_as_an_integer_and_never_through_a_float() {
+        let text = linear_with_history().replacen(
+            "settled = 1735632000000 x 0.00011",
+            "settled = 1.7356e12 x 0.00011",
+            1,
+        );
+        assert_eq!(
+            fail(&text).1,
+            ParseReason::BadInteger {
+                field: "settled",
+                value: String::from("1.7356e12"),
+            }
+        );
+    }
+
+    #[test]
+    fn borrow_and_history_are_unknown_sections_to_nobody() {
+        // The two names are in KNOWN_SECTIONS, so a typo in either is still an
+        // error rather than a silently ignored block. `[borrows]` is the plural a
+        // person writes at 2am.
+        let text = format!("{SPOT}\n[borrows]\nasset = ETH\n");
+        assert_eq!(
+            fail(&text).1,
+            ParseReason::UnknownSection(String::from("borrows"))
+        );
+        let text = format!("{LINEAR}\n{LINEAR_HISTORY}\n{LINEAR_HISTORY}");
+        assert_eq!(
+            fail(&text).1,
+            ParseReason::DuplicateSection(String::from("history"))
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_in_either_new_section_is_an_error() {
+        // No defaults, same as everywhere else: `interval` is what someone writes
+        // when they mean `interval_secs`, and swallowing it would leave the
+        // mandatory field missing while looking like it was supplied.
+        let text = spot_with_borrow().replacen("interval_secs = 3600", "interval = 3600", 1);
+        assert_eq!(fail(&text).1, ParseReason::MissingKey("interval_secs"));
+
+        let text = format!("{LINEAR}\n[history]\nsettles = 1735603200000 x 0.0001\n");
+        assert_eq!(
+            fail(&text).1,
+            ParseReason::UnknownKey(String::from("settles"))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // D5: a fixture may not contradict itself about its ladder's unit
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_size_unit_that_contradicts_the_contract_size_is_refused() {
+        // `OPEN.md` D5. `ContractSpec::validate` permits the disagreement on
+        // purpose — for a live adapter it is a signal about the payload — but a
+        // fixture is one file about one instrument and nothing in the workspace
+        // dispatches arithmetic on the declared unit, so a contradiction means the
+        // printed unit and the computed unit differ in silence.
+        let text = LINEAR.replacen("size_unit = base", "size_unit = contracts", 1);
+        assert_eq!(
+            fail(&text).1,
+            ParseReason::SizeUnitContradiction {
+                declared: "contracts",
+                implied: "base",
+            }
+        );
+
+        let text = INVERSE.replacen("size_unit = contracts", "size_unit = base", 1);
+        assert_eq!(
+            fail(&text).1,
+            ParseReason::SizeUnitContradiction {
+                declared: "base",
+                implied: "contracts",
+            }
+        );
+    }
+
+    #[test]
+    fn the_contract_size_check_still_reports_before_the_unit_check() {
+        // Ordering matters: a `quote:` size on a linear market is the ~68,000x
+        // error, and it travels with a unit contradiction. If the unit check ran
+        // first, the louder defect would be reported as the quieter one.
+        let text = LINEAR.replacen("contract_size = base:1", "contract_size = quote:100", 1);
+        match fail(&text).1 {
+            ParseReason::Type(_) => {}
+            other => panic!("expected the kind/size mismatch to win, got {other:?}"),
+        }
     }
 }
 

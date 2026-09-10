@@ -65,6 +65,68 @@ pub enum ParseReason {
     /// funding rate attached to spot is a copy-paste error that would double
     /// count carry.
     FundingOnSpot,
+    /// A `[borrow]` section on a perpetual.
+    ///
+    /// The mirror of [`ParseReason::FundingOnSpot`], and refused for the same
+    /// reason. Borrowing is what a **short spot** leg does: selling an asset we
+    /// do not own means borrowing it. A short perp posts margin and borrows
+    /// nothing, so `arb_scan::scan::price_pair` never reads the field on a perp
+    /// leg — a `[borrow]` block there would look like a priced cost while
+    /// pricing nothing, which is worse than an absent one because it reads as
+    /// answered.
+    BorrowOnPerp,
+    /// A `[borrow] asset` that is not the instrument's base asset.
+    ///
+    /// Not a warning, because `arb_scan::LegInput::assemble` answers this
+    /// mismatch with `ScanError::BorrowAssetMismatch`, which kills the whole leg
+    /// rather than flagging one field. Refusing it here converts a runtime leg
+    /// failure with no location into a parse error with a line number.
+    BorrowAssetNotBase {
+        /// What the section said.
+        found: String,
+        /// The instrument's base asset, which is the only asset a short of it
+        /// borrows.
+        base: String,
+    },
+    /// A `[history]` section on a spot instrument.
+    ///
+    /// The entries are settled **funding** rates and spot settles no funding, so
+    /// the section is a category error there. `arb_scan::scan::price_pair` raises
+    /// `RATE_HISTORY_MISSING` only for a leg where `funding.is_some()`, so a
+    /// history on spot would never be read either.
+    HistoryOnSpot,
+    /// A `settled` line that was not `TIMESTAMP_MS x RATE`.
+    BadSettledRate(String),
+    /// A settled funding rate stamped at or after the next settlement.
+    ///
+    /// A rate that has settled is in the past by definition; one stamped beyond
+    /// `next_funding_at` is a forecast wearing a settled rate's clothes, and
+    /// `arb_types::RateHistory` exists precisely to keep forecasts out of the
+    /// series (a series of revised forecasts is smoother than the realised one,
+    /// so persistence would look better than it was). This check has no false
+    /// positives: both stamps come from the same file.
+    SettledRateNotInThePast {
+        /// The settlement stamp the file gave, in milliseconds.
+        settled_at: i64,
+        /// The next settlement the `[funding]` section declares, in
+        /// milliseconds.
+        next_funding_at: i64,
+    },
+    /// `size_unit` disagrees with the unit `contract_size` implies.
+    ///
+    /// `ContractSpec::validate` deliberately permits the disagreement — see
+    /// `decisions/024` and `OPEN.md` D5 — because a live adapter may legitimately
+    /// report a `Contracts` ladder beside a `base:` contract size. A *fixture*
+    /// has no such excuse: it is one hand-written file describing one
+    /// instrument, and today nothing in the workspace dispatches arithmetic on
+    /// `size_unit` (`arb-scan` branches on `ContractSize`), so a contradiction
+    /// means the unit we print and the unit we compute differ silently.
+    SizeUnitContradiction {
+        /// What `size_unit` declared.
+        declared: &'static str,
+        /// What `SizeUnit::implied_by(contract_size)` says the ladder is in.
+        implied: &'static str,
+    },
     /// A fixed-point parse or conversion failed. `PrecisionLoss` here means the
     /// file carried more than 12 decimal places, which we refuse to round
     /// silently.
@@ -105,6 +167,30 @@ impl fmt::Display for ParseReason {
             ParseReason::FundingOnSpot => {
                 write!(f, "[funding] is not valid for kind = spot")
             }
+            ParseReason::BorrowOnPerp => {
+                write!(f, "[borrow] is not valid for a perpetual: a short perp posts margin, it does not borrow")
+            }
+            ParseReason::BorrowAssetNotBase { found, base } => write!(
+                f,
+                "[borrow] asset {found:?} is not the instrument's base {base:?}"
+            ),
+            ParseReason::HistoryOnSpot => {
+                write!(f, "[history] is not valid for kind = spot: spot settles no funding")
+            }
+            ParseReason::BadSettledRate(v) => {
+                write!(f, "expected `TIMESTAMP_MS x RATE`, got {v:?}")
+            }
+            ParseReason::SettledRateNotInThePast {
+                settled_at,
+                next_funding_at,
+            } => write!(
+                f,
+                "settled rate at {settled_at} is not before next_funding_at {next_funding_at}"
+            ),
+            ParseReason::SizeUnitContradiction { declared, implied } => write!(
+                f,
+                "size_unit = {declared} contradicts contract_size, which implies {implied}"
+            ),
             // NumError / TypeError are printed via Debug: this crate does not
             // assume they implement Display, and their variant names are
             // already the whole message.

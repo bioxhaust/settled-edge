@@ -1,0 +1,49 @@
+СНИМОК БАЙТОВ
+снят:    2026-08-24T22-57-55Z (UTC)
+машина:  Darwin arm64
+curl:    curl 8.7.1 (x86_64-apple-darwin25.0) libcurl/8.7.1 (SecureTransport) LibreSSL/3.3.6 zlib/1.2.12 nghttp2/1.66.0
+
+Провенанс: измерено живьём с машины владельца. Это те байты, которые
+имеют право стать Provenance::LiveMeasured.
+
+ФАЙЛ                                   КОД   БАЙТ  URL
+bybit-instruments.json                        200        979  https://api.bybit.com/v5/market/instruments-info?category=linear&symbol=BTCUSDT
+bybit-tickers.json                            200        879  https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT
+bybit-orderbook.json                          200        382  https://api.bybit.com/v5/market/orderbook?category=linear&symbol=BTCUSDT&limit=5
+bybit-funding-hist.json                       200       2663  https://api.bybit.com/v5/market/funding/history?category=linear&symbol=BTCUSDT&limit=30
+binance-exchangeinfo.json                     200    1077489  https://fapi.binance.com/fapi/v1/exchangeInfo
+binance-premiumindex.json                     200        231  https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT
+binance-depth.json                            200        295  https://fapi.binance.com/fapi/v1/depth?symbol=BTCUSDT&limit=5
+binance-funding-hist.json                     200       3781  https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=30
+binance-funding-info.json                     200     129901  https://fapi.binance.com/fapi/v1/fundingInfo
+okx-instruments.json                          200       1079  https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=BTC-USDT-SWAP
+okx-funding-rate.json                         200        524  https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP
+okx-books.json                                200        371  https://www.okx.com/api/v5/market/books?instId=BTC-USDT-SWAP&sz=5
+okx-funding-hist.json                         200       5626  https://www.okx.com/api/v5/public/funding-rate-history?instId=BTC-USDT-SWAP&limit=30
+bitget-contracts.json                         200        832  https://api.bitget.com/api/v2/mix/market/contracts?productType=USDT-FUTURES&symbol=BTCUSDT
+bitget-fundrate.json                          200        222  https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=BTCUSDT&productType=USDT-FUTURES
+bitget-orderbook.json                         200        438  https://api.bitget.com/api/v2/mix/market/orderbook?symbol=BTCUSDT&productType=USDT-FUTURES&limit=5
+bitget-fundrate-hist.json                     200       2330  https://api.bitget.com/api/v2/mix/market/history-fund-rate?symbol=BTCUSDT&productType=USDT-FUTURES&pageSize=30
+mexc-detail.json                              200       2351  https://contract.mexc.com/api/v1/contract/detail?symbol=BTC_USDT
+mexc-funding.json                             200        237  https://contract.mexc.com/api/v1/contract/funding_rate/BTC_USDT
+mexc-depth.json                               200      43633  https://contract.mexc.com/api/v1/contract/depth/BTC_USDT
+mexc-funding-hist.json                        200       2757  https://contract.mexc.com/api/v1/contract/funding_rate/history?symbol=BTC_USDT&page_size=30
+gate-contract.json                            200       1330  https://api.gateio.ws/api/v4/futures/usdt/contracts/BTC_USDT
+gate-orderbook.json                           200        315  https://api.gateio.ws/api/v4/futures/usdt/order_book?contract=BTC_USDT&limit=5
+gate-funding-hist.json                        200        936  https://api.gateio.ws/api/v4/futures/usdt/funding_rate?contract=BTC_USDT&limit=30
+kucoin-contract.json                          200       2029  https://api-futures.kucoin.com/api/v1/contracts/XBTUSDTM
+kucoin-funding.json                           200        261  https://api-futures.kucoin.com/api/v1/funding-rate/XBTUSDTM/current
+kucoin-depth.json                             200        642  https://api-futures.kucoin.com/api/v1/level2/depth20?symbol=XBTUSDTM
+htx-contract.json                             200        508  https://api.hbdm.com/linear-swap-api/v1/swap_contract_info?contract_code=BTC-USDT
+htx-funding.json                              200        246  https://api.hbdm.com/linear-swap-api/v1/swap_funding_rate?contract_code=BTC-USDT
+htx-depth.json                                200       4223  https://api.hbdm.com/linear-swap-ex/market/depth?contract_code=BTC-USDT&type=step0
+htx-funding-hist.json                         200       6774  https://api.hbdm.com/linear-swap-api/v1/swap_historical_funding_rate?contract_code=BTC-USDT&page_size=30
+binance-spot-depth.json                       200        366  https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=5
+binance-spot-info.json                        200       5335  https://api.binance.com/api/v3/exchangeInfo?symbol=BTCUSDT
+
+Итого: 33 из 34 ответили 200.
+
+Файл с кодом, отличным от 200, или размером в пару байт — это ФАКТ про
+эндпоинт, а не поломка. Агент обязан прочитать его как факт: адрес мог
+переехать, площадка могла закрыть эндпоинт, регион мог быть ограничен.
+Выдумывать содержимое такого файла запрещено правилом 7.

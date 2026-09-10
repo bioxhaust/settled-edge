@@ -17,6 +17,18 @@
 //! - [`SeqHealth::Unusable`] — the ladder is not the venue's ladder. Prices
 //!   derived from it are fabrications, however fresh they are.
 //!
+//! Two more were added when the assumptions behind them were finally made
+//! checkable, and both are fatal for the same reason: they say a *number we have
+//! been doing arithmetic on is not the quantity we thought*, which no deduction
+//! can express.
+//!
+//! - [`DepthSemantics::Contradicted`] — the feed did something an absolute-size
+//!   feed cannot do, so the ladder's levels and sizes are not the venue's
+//!   (`OPEN.md` D2).
+//! - [`TsUnit::NotMillis`] — the venue's timestamps are not in milliseconds, so
+//!   every age and every skew computed from this feed is wrong by a factor of a
+//!   thousand or more (`OPEN.md` D4).
+//!
 //! Everything else is a deduction from 100, and the deductions are sized so that
 //! **one** non-fatal defect at full strength still leaves a tradeable score,
 //! while **two** independent defects do not. That is the judgement in one
@@ -29,7 +41,9 @@
 use arb_types::{BookSnapshot, QualityFlags, Venue};
 
 use crate::clock::ClockVerdict;
+use crate::epoch::{EpochUnit, TsUnit};
 use crate::painted::{PaintReport, PaintSignal};
+use crate::semantics::{DepthSemantics, SemanticsTell, WhyUnevaluated};
 use crate::sequence::SeqHealth;
 use crate::staleness::Staleness;
 
@@ -165,6 +179,53 @@ pub const THIN_DEPTH_PENALTY: i32 = 15;
 /// outright.
 pub const PAINT_FLAG_MIN_SCORE: u8 = 50;
 
+/// Deduction for circumstantial evidence that depth updates are not absolute
+/// sizes.
+///
+/// 30 points, the same weight as [`CROSSED_PENALTY`], and by the same argument:
+/// both say *the touch prices may not be real prices*. A crossed book says it
+/// because a bid above an ask cannot persist; suspect depth semantics say it
+/// because a feed whose deletes we never receive leaves levels in the ladder that
+/// nobody is offering, which makes the spread read tighter than it is. That is
+/// the favourable direction, so it is the direction ranking selects for.
+///
+/// Why not fatal: [`DepthSemantics::Suspect`] is an *absence* over a sample — no
+/// delete seen, no delete landed — and an absence has innocent explanations
+/// (a quiet instrument, a short window). Why not smaller: at 30 this plus any
+/// second defect is untradeable, which is the same treatment a crossed book gets
+/// and the same sentence the crate docs describe.
+///
+/// [`DepthSemantics::Contradicted`] is not on this scale. It is fatal, because it
+/// is not an absence — it is the feed doing something an absolute-size feed
+/// cannot do.
+pub const DEPTH_SEMANTICS_SUSPECT_PENALTY: i32 = 30;
+
+/// Deduction when depth semantics were not evaluated at all.
+///
+/// **Zero, deliberately, and this is the one place in this crate where "we did
+/// not look" is not priced.** Recorded as a note so it is never silent, but it
+/// costs nothing. Three reasons, in order of weight:
+///
+/// 1. Unlike a paint assessment, this one *cannot* be run on demand. It needs a
+///    sample. Every fresh connection and every reconnect is legitimately
+///    [`WhyUnevaluated::NoSampleYet`] for several minutes, and charging for that
+///    would charge for reconnecting.
+/// 2. Nothing in the workspace populates [`crate::semantics::DepthEvidence`]
+///    yet, so a non-zero figure here would deduct from **every venue
+///    immediately**. Stacked on the existing 20 for an absent paint report, a
+///    venue with nothing whatever wrong with it would score 60 — exactly
+///    [`MIN_TRADEABLE`] — and any further defect would stop all trading.
+/// 3. That is a redistribution of the score budget, and the budget is shared
+///    with every other detector. Choosing it unilaterally would also mean
+///    rewriting exact-score assertions in `arb-adversary`, which is not this
+///    crate's to rewrite.
+///
+/// So the honest reading of this zero is: **an open question, not a judgement.**
+/// It is raised in `team/inbox/LEAD.md`. What is *not* deferred is the fatal
+/// treatment of [`DepthSemantics::Contradicted`], which needs no budget
+/// discussion because it floors rather than deducts.
+pub const DEPTH_SEMANTICS_UNEVALUATED_PENALTY: i32 = 0;
+
 /// Everything the four detectors found for one venue, bundled so the combining
 /// rules live in one place instead of at every call site.
 ///
@@ -189,6 +250,23 @@ pub struct VenueEvidence {
     /// Caller's verdict that displayed depth is too thin for the intended size.
     /// This crate cannot decide it: it depends on an order size we never see.
     pub thin_depth: bool,
+    /// Whether this venue's depth updates really are absolute sizes
+    /// (`OPEN.md` D2). Feed it
+    /// [`crate::semantics::assess_depth_semantics`].
+    ///
+    /// Defaults to `Unevaluated(NoSampleYet)` in [`VenueEvidence::clean`], which
+    /// is the truth about every venue in this workspace today: the detector
+    /// exists and nothing feeds it yet.
+    pub depth_semantics: DepthSemantics,
+    /// What unit this venue's timestamps arrived in (`OPEN.md` D4). Feed it
+    /// [`TsUnit::of`] at the parse boundary, on the value **as parsed**.
+    ///
+    /// Defaults to [`TsUnit::NoTimestamp`], which is a deliberate choice about
+    /// which mistake is possible. A caller that forgets this field gets the same
+    /// treatment as a venue that sent no timestamp — no penalty and no
+    /// protection — rather than a free `Millis` that would assert the assumption
+    /// this field exists to test.
+    pub ts_unit: TsUnit,
 }
 
 impl VenueEvidence {
@@ -203,6 +281,11 @@ impl VenueEvidence {
             paint: None,
             crossed: false,
             thin_depth: false,
+            // Not `NoContraryEvidence`: nothing has been evaluated, and a
+            // convenient default here would be the whole defect this field
+            // exists to catch.
+            depth_semantics: DepthSemantics::Unevaluated(WhyUnevaluated::NoSampleYet),
+            ts_unit: TsUnit::NoTimestamp,
         }
     }
 }
@@ -217,12 +300,24 @@ pub enum TrustNote {
     FatalDataDead,
     /// The ladder cannot be trusted. Fatal.
     FatalSequenceUnusable,
+    /// The feed did something an absolute-size depth feed cannot do, so the
+    /// ladder's levels and sizes are not the venue's. Fatal.
+    FatalDepthSemantics(SemanticsTell),
+    /// The venue's timestamps are not in milliseconds, so every age and skew
+    /// computed from this feed is wrong by the unit's factor. Fatal.
+    FatalTimestampUnit(EpochUnit),
     /// Age is past the warn or stale threshold.
     Aging(Staleness),
     /// Clock reading is not aligned.
     Clock(ClockVerdict),
     /// Sequence health is degraded.
     SequenceDegraded,
+    /// Circumstantial evidence that depth updates are not absolute sizes.
+    DepthSemanticsSuspect(SemanticsTell),
+    /// Depth semantics were not evaluated. Carries no penalty — see
+    /// [`DEPTH_SEMANTICS_UNEVALUATED_PENALTY`] — and exists so the gap is
+    /// visible instead of silent.
+    DepthSemanticsNotEvaluated(WhyUnevaluated),
     /// Paint suspicion at this score.
     PaintSuspicion(u8),
     /// No paint assessment was supplied.
@@ -240,10 +335,26 @@ impl std::fmt::Display for TrustNote {
             TrustNote::FatalSequenceUnusable => {
                 f.write_str("FATAL: sequence unusable, the ladder is not the venue's ladder")
             }
+            TrustNote::FatalDepthSemantics(t) => write!(
+                f,
+                "FATAL: depth updates are not absolute sizes ({t}), \
+                 the ladder's levels are not the venue's"
+            ),
+            TrustNote::FatalTimestampUnit(u) => write!(
+                f,
+                "FATAL: venue timestamps are not milliseconds, they look like {u}; \
+                 every age computed from this feed is wrong"
+            ),
             TrustNote::Aging(s) => write!(f, "age: {s}"),
             TrustNote::Clock(v) => write!(f, "{v}"),
             TrustNote::SequenceDegraded => {
                 f.write_str("sequence degraded: some levels were reconstructed, not observed")
+            }
+            TrustNote::DepthSemanticsSuspect(t) => {
+                write!(f, "depth semantics suspect: {t}")
+            }
+            TrustNote::DepthSemanticsNotEvaluated(w) => {
+                write!(f, "depth semantics not evaluated: {}", w.tag())
             }
             TrustNote::PaintSuspicion(score) => write!(f, "paint suspicion score {score}/100"),
             TrustNote::PaintNotAssessed => f.write_str("depth was not assessed for painting"),
@@ -278,12 +389,25 @@ impl VenueTrust {
     /// True when a fatal input floored the score, as opposed to a pile of small
     /// deductions adding up to the same number. The distinction matters when
     /// deciding whether to retry or to disconnect.
+    ///
+    /// Matched exhaustively rather than with a wildcard: a wildcard would make a
+    /// future fatal variant default to *not* fatal, and that default is the wrong
+    /// way round for a predicate that gates trading.
     pub fn has_fatal(&self) -> bool {
-        self.notes.iter().any(|n| {
-            matches!(
-                n,
-                TrustNote::FatalDataDead | TrustNote::FatalSequenceUnusable
-            )
+        self.notes.iter().any(|n| match n {
+            TrustNote::FatalDataDead
+            | TrustNote::FatalSequenceUnusable
+            | TrustNote::FatalDepthSemantics(_)
+            | TrustNote::FatalTimestampUnit(_) => true,
+            TrustNote::Aging(_)
+            | TrustNote::Clock(_)
+            | TrustNote::SequenceDegraded
+            | TrustNote::DepthSemanticsSuspect(_)
+            | TrustNote::DepthSemanticsNotEvaluated(_)
+            | TrustNote::PaintSuspicion(_)
+            | TrustNote::PaintNotAssessed
+            | TrustNote::CrossedBook
+            | TrustNote::ThinDepth => false,
         })
     }
 }
@@ -328,6 +452,18 @@ pub fn assess_venue(ev: &VenueEvidence) -> VenueTrust {
     }
     if ev.sequence == SeqHealth::Unusable {
         notes.push(TrustNote::FatalSequenceUnusable);
+        fatal = true;
+    }
+    // D2 and D4. Both are fatal for the same reason and it is not severity: a
+    // deduction says "this data is worse than we would like", and neither of
+    // these is about quality. Each says a number we have been doing arithmetic on
+    // is not the quantity we thought it was, so there is nothing left to grade.
+    if let DepthSemantics::Contradicted(tell) = ev.depth_semantics {
+        notes.push(TrustNote::FatalDepthSemantics(tell));
+        fatal = true;
+    }
+    if let TsUnit::NotMillis(unit) = ev.ts_unit {
+        notes.push(TrustNote::FatalTimestampUnit(unit));
         fatal = true;
     }
 

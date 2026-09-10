@@ -29,9 +29,19 @@
 //! [`margin_required`] rounds **up**, twice. It computes `1/leverage` and then
 //! multiplies, and each step rounds away from zero, so the figure is at or above
 //! the true requirement. The two roundings compound to at most about `2e-12`
-//! relative — one ulp from the reciprocal, magnified by the notional, plus one
-//! from the product. On a 1,000,000 USD notional that is a fifth of a cent. It is
-//! documented rather than hidden (`OPEN.md` C3); removing it needs a
+//! **relative** — one ulp from the reciprocal, magnified by the notional, plus one
+//! from the product. On a 1,000,000 USD notional at 3x that is `6.67e-7` USD,
+//! about one ten-thousandth of a cent, pinned by
+//! `the_two_rounding_overstatement_is_proportional_to_notional`.
+//!
+//! An earlier revision of this paragraph said "a fifth of a cent", which is
+//! `2e-3` USD — three thousand times the real figure. The direction was safe (it
+//! claimed our error was *larger* than it is) and that is exactly why it survived:
+//! `OPEN.md` F1 is the lesson that an error in the flattering-to-nobody direction
+//! still hides better than the other kind. The bound is now a number a test
+//! computed rather than a number a comment asserted.
+//!
+//! It is documented rather than hidden (`OPEN.md` C3); removing it needs a
 //! `Money::div_rate` in `arb-num`, which is frozen while this wave is in flight.
 
 use crate::error::MathError;
@@ -343,6 +353,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_two_rounding_overstatement_is_proportional_to_notional() {
+        // The module docs claim a bound. This is the arithmetic that checks it,
+        // because the previous claim — "a fifth of a cent on 1,000,000" — was
+        // wrong by a factor of three thousand and nobody had re-derived it.
+        //
+        // 1/3 at scale 1e12 rounded up (COST) is 0.333333333334, which is
+        // 6.666...e-13 above the true reciprocal. Multiplied by a 1,000,000
+        // notional that becomes 6.666...e-7 USD, and the second rounding cannot
+        // add more than one further ulp.
+        //
+        // True requirement, rounded up at scale 1e12:
+        //   1_000_000 / 3 = 333_333.333333333333... -> 333_333.333333333334
+        // Reported:
+        //   1_000_000 * 0.333333333334 = 333_333.334 exactly.
+        let reported = margin_required(money("1000000"), rate("3")).expect("ok");
+        let true_up = Money::from_raw(333_333_333_333_333_334);
+        assert_eq!(reported, Money::from_raw(333_333_333_334_000_000));
+        let over = reported.checked_sub(true_up).expect("ok");
+        assert_eq!(over, Money::from_raw(666_666));
+        // Stated as the claim the docs make, so the two cannot drift apart: the
+        // overstatement is 6.67e-7 USD, which is under one ten-thousandth of a
+        // cent, and it is *not* the two-ulp figure a reader might assume from
+        // "two roundings".
+        assert!(over < Money::from_raw(1_000_000));
+        assert!(over > Money::from_raw(2));
+        // Proportional, not constant: a hundred times the notional overstates by
+        // a hundred times as much. This is the property that makes the bound a
+        // relative one, and the reason a reader must not carry the absolute
+        // figure to a larger size.
+        //
+        // The proportionality is exact on the **reported** figure, because the
+        // multiplication `notional * inverse` has no remainder at either scale.
+        // It is *not* exact on the overstatement, and the reason is worth stating
+        // rather than smoothing over: the reference value is separately rounded
+        // up at each scale, so `100 * true_up(10_000)` exceeds `true_up(1_000_000)`
+        // by 66 raw. That 6.6e-11 USD lives in the reference, not in
+        // `margin_required`.
+        let smaller = margin_required(money("10000"), rate("3")).expect("ok");
+        let smaller_true = Money::from_raw(3_333_333_333_333_334);
+        let smaller_over = smaller.checked_sub(smaller_true).expect("ok");
+        assert_eq!(smaller, Money::from_raw(3_333_333_333_340_000));
+        assert_eq!(smaller_over, Money::from_raw(6_666));
+        assert_eq!(
+            reported.raw(),
+            smaller.raw().checked_mul(100).expect("no overflow"),
+            "the reported margin scales exactly with the notional"
+        );
+        assert_eq!(
+            smaller_true.raw() * 100 - true_up.raw(),
+            66,
+            "the gap is the reference's own round-up, not ours"
+        );
     }
 
     #[test]

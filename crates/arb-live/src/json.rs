@@ -348,7 +348,15 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect(&mut self, byte: u8) -> Result<(), JsonError> {
+    /// Consume `byte` or say what was there instead.
+    ///
+    /// Named `eat` rather than the more obvious `expect` on purpose. It returns a
+    /// `Result` and cannot panic, but `.expect(` is exactly the text the
+    /// `NOUNWRAP` gate greps for, so a parser method with that name put four
+    /// permanent false positives into the gate's output — and four false positives
+    /// are how a real `unreachable!` three lines away goes unnoticed for a round.
+    /// A guard that cries wolf is worth less than the name it saved.
+    fn eat(&mut self, byte: u8) -> Result<(), JsonError> {
         match self.peek() {
             Some(b) if b == byte => {
                 self.pos += 1;
@@ -398,7 +406,7 @@ impl<'a> Parser<'a> {
     }
 
     fn object(&mut self, depth: usize) -> Result<Json, JsonError> {
-        self.expect(b'{')?;
+        self.eat(b'{')?;
         let mut pairs: Vec<(String, Json)> = Vec::new();
         self.skip_ws();
         if self.peek() == Some(b'}') {
@@ -408,16 +416,12 @@ impl<'a> Parser<'a> {
         loop {
             self.skip_ws();
             let key_at = self.pos;
-            let key = match self.string_value()? {
-                Json::Str(s) => s,
-                // `string_value` only ever returns `Json::Str`.
-                _ => unreachable!("string_value returns Str"),
-            };
+            let key = self.string_raw()?;
             if pairs.iter().any(|(k, _)| *k == key) {
                 return Err(JsonError::DuplicateKey { key, at: key_at });
             }
             self.skip_ws();
-            self.expect(b':')?;
+            self.eat(b':')?;
             self.skip_ws();
             let value = self.value(depth + 1)?;
             pairs.push((key, value));
@@ -442,7 +446,7 @@ impl<'a> Parser<'a> {
     }
 
     fn array(&mut self, depth: usize) -> Result<Json, JsonError> {
-        self.expect(b'[')?;
+        self.eat(b'[')?;
         let mut items = Vec::new();
         self.skip_ws();
         if self.peek() == Some(b']') {
@@ -526,8 +530,16 @@ impl<'a> Parser<'a> {
         Ok(Json::Num(text.to_string()))
     }
 
-    fn string_value(&mut self) -> Result<Json, JsonError> {
-        self.expect(b'"')?;
+    /// A JSON string, as the [`String`] it always was.
+    ///
+    /// Split out from [`Parser::string_value`] so that an object *key* — which is
+    /// a string by grammar and never anything else — can be read without a
+    /// `match` on a variant the parser already knows. The `match` this replaced
+    /// ended in `unreachable!`, which is a panic in production code and therefore
+    /// a hard-rule-4 defect however well commented it was. Making the impossible
+    /// case not exist is the only fix that does not rely on a comment being true.
+    fn string_raw(&mut self) -> Result<String, JsonError> {
+        self.eat(b'"')?;
         let mut out = String::new();
         loop {
             let at = self.pos;
@@ -535,7 +547,7 @@ impl<'a> Parser<'a> {
                 None => return Err(JsonError::UnexpectedEnd),
                 Some(b'"') => {
                     self.pos += 1;
-                    return Ok(Json::Str(out));
+                    return Ok(out);
                 }
                 Some(b'\\') => {
                     self.pos += 1;
@@ -557,6 +569,14 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+    }
+
+    /// A JSON string as a [`Json::Str`], for a *value* position.
+    ///
+    /// A thin wrapper over [`Parser::string_raw`] so the variant is constructed in
+    /// one place instead of being asserted about in two.
+    fn string_value(&mut self) -> Result<Json, JsonError> {
+        Ok(Json::Str(self.string_raw()?))
     }
 
     fn escape(&mut self, at: usize, out: &mut String) -> Result<(), JsonError> {
@@ -639,11 +659,20 @@ mod tests {
 
     // -- the reason this module exists ------------------------------------
 
-    /// The claim in the module docs, demonstrated rather than asserted in prose.
+    /// The claim in the module docs, proved rather than demonstrated.
     ///
-    /// If this parser went through `f64`, the price Binance sent would not come
-    /// back out. The test computes the `f64` round trip explicitly so the failure
-    /// mode is visible in the source, not just described.
+    /// # Why this test no longer performs a float round trip
+    ///
+    /// It used to parse the price into a float and show the digits came back
+    /// changed. That read well and was the wrong way round: hard rule 2 says a
+    /// float never touches a price *anywhere*, and the `NOFLOAT` gate scans tests
+    /// too, deliberately — a test that compares money through a float does not
+    /// prove exactness. So the one place in this workspace where a float touched a
+    /// price was the test defending the rule against floats.
+    ///
+    /// What replaces it is stronger, not weaker. A runtime round trip shows one
+    /// value on one target; the argument below rules out the whole format class
+    /// arithmetically, in integers, and is checkable by hand.
     #[test]
     fn a_price_survives_because_it_is_never_a_float() {
         let body = r#"{"bids":[["78913.99","4.17840"]]}"#;
@@ -658,19 +687,49 @@ mod tests {
         // Exactly what the venue sent, digit for digit.
         assert_eq!(price, "78913.99");
 
-        // What an f64 round trip would have done to it. `78913.99` is not a
-        // dyadic rational, so the nearest f64 is strictly greater, and the
-        // difference is real rather than a display artefact.
-        let through_float: f64 = price.parse().expect("f64");
+        // The proof that no binary float can hold it, in integers.
+        //
+        //   78913.99 = 7891399 / 100, and that fraction is already in lowest
+        //   terms: 7891399 is odd and does not end in 0 or 5.
+        //
+        //   Every binary floating-point value is m / 2^k for some integers m, k.
+        //   That is the definition and it says nothing about mantissa width, so
+        //   the argument covers f32, f64 and any wider format equally.
+        //
+        //   If 7891399/100 = m/2^k then 7891399 * 2^k = 100m, so 25 divides
+        //   7891399 * 2^k. But gcd(25, 2^k) = 1, so 25 would have to divide
+        //   7891399 — and it does not. No such m, k exist.
+        //
+        // The two divisibility facts carry the whole argument, so they are
+        // asserted rather than described.
+        let (num, den) = (7_891_399_i64, 100_i64);
+        assert_eq!(num % 2, 1, "numerator must be odd, or the fraction reduces");
+        assert_ne!(num % 5, 0, "numerator must not be divisible by 5");
+        assert_eq!(den % 25, 0, "denominator must carry the factor 5^2");
+        // And the venue's text really is that fraction, so the argument is about
+        // this price rather than about a number chosen to make it come out.
+        assert_eq!(price.replace('.', "").parse::<i64>(), Ok(num));
+        assert_eq!(
+            price.len() - price.find('.').expect("a decimal point") - 1,
+            2,
+            "two decimal places, so the denominator is 10^2"
+        );
+
+        // What a float would have produced instead, quoted from the module docs
+        // and kept as *text* so recording it costs no float of its own. This is
+        // the nearest binary64 value to 78913.99.
+        const NEAREST_BINARY64: &str = "78913.990000000005238689482212066650390625";
+        assert_ne!(NEAREST_BINARY64, price);
         assert!(
-            through_float > 78913.99_f64.floor(),
-            "sanity: the float is in range"
+            NEAREST_BINARY64.starts_with(price),
+            "the nearest value agrees to the venue's last digit and only then \
+             diverges, which is exactly why the error is silent"
         );
-        assert_ne!(
-            format!("{through_float:.20}"),
-            "78913.99000000000000000000",
-            "an f64 cannot hold this price exactly, which is why Num keeps text"
-        );
+
+        // The end of the chain this module exists to protect: the text reaches
+        // `arb-num` and lands on the 1e12 grid with no residue at all.
+        let exact = arb_num::Price::parse(price).expect("price");
+        assert_eq!(exact.raw(), 78_913_990_000_000_000);
     }
 
     /// Quoted or bare, an adapter asks for digits and gets digits.
@@ -719,12 +778,22 @@ mod tests {
 
     // -- real payload shapes ----------------------------------------------
 
-    /// The Binance USD-M depth shape, as captured from the live endpoint.
+    /// The Binance USD-M depth **shape**. `[не знаю — происхождение байтов]`
+    ///
+    /// The claim this replaced was «as captured from the live endpoint». It is not
+    /// defensible: charter 1a measured `000` on Binance hosts on the only date this
+    /// file could have been written, and the literal below is wrapped across lines
+    /// with indentation, so whatever it is, it is definitionally not the bytes a
+    /// venue sent. Kept because what the test actually checks does not depend on
+    /// provenance at all — it checks that *this reader* handles bare numbers beside
+    /// quoted ones, and nameless two-element levels. A shape test is honest as a
+    /// shape test and dishonest only when it calls itself a measurement.
     ///
     /// Note `E` and `T` as bare numbers beside quoted level values, and the
-    /// levels as two-element arrays with no field names. The spot endpoint
-    /// (`api/v3/depth`) omits `E` and `T` entirely, which is why an adapter
-    /// cannot assume an exchange timestamp is available.
+    /// levels as two-element arrays with no field names. `[предположение]` The spot
+    /// endpoint (`api/v3/depth`) omits `E` and `T` entirely, which is why an adapter
+    /// cannot assume an exchange timestamp is available — that asymmetry is recalled,
+    /// not measured, and `venues/binance.rs` carries it as an assumption too.
     #[test]
     fn the_binance_depth_shape_reads() {
         let body = r#"{"lastUpdateId":11377592038715,"E":1787597215564,"T":1787597215562,

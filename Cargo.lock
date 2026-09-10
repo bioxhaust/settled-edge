@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "arb-book",
  "arb-detect",
+ "arb-live",
  "arb-math",
  "arb-num",
  "arb-scan",

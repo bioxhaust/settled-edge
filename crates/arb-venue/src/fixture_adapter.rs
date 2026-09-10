@@ -30,7 +30,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use arb_types::{
-    BookSnapshot, DataQuality, FundingSnapshot, Instrument, InstrumentKey, LocalTs, Venue,
+    BookSnapshot, BorrowSnapshot, DataQuality, FundingSnapshot, Instrument, InstrumentKey, LocalTs,
+    RateHistory, Venue,
 };
 
 use crate::adapter::{ExchangeAdapter, FeeSchedule};
@@ -369,6 +370,25 @@ impl ExchangeAdapter for FixtureAdapter {
         // matching `DataQuality` is `FixtureAdapter::fee_quality`, because
         // `FeeSchedule` has nowhere to carry provenance.
         Ok(self.find(key)?.fees)
+    }
+
+    fn borrow(&self, key: &InstrumentKey) -> Result<Option<BorrowSnapshot>, VenueError> {
+        // Overridden rather than inherited even though every shipped fixture
+        // answers `None`, because the default would keep answering `None` after a
+        // recorded borrow rate arrived in a file — the numbers would be in the
+        // fixture, the format would accept them, and the adapter would still
+        // report "unknown". A silently ignored input is the harder bug of the two.
+        //
+        // The `None` this returns today is not a placeholder: no venue has quoted
+        // us a borrow rate, so the reverse-carry rows stay blocked. See the module
+        // docs of `crate::fixture` for why inventing one is refused.
+        self.find(key)?.borrow_snapshot(OBSERVED_AT)
+    }
+
+    fn rate_history(&self, key: &InstrumentKey) -> Result<Option<RateHistory>, VenueError> {
+        // Same reasoning. `rate_history` takes no observation time: a settled rate
+        // is stamped when money moved, and `OBSERVED_AT` has no business in it.
+        Ok(self.find(key)?.rate_history())
     }
 }
 

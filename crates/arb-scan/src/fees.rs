@@ -35,9 +35,9 @@
 //! the two schedules are equal, which is asserted by test so the two paths cannot
 //! drift.
 
-use arb_math::{FeeRates, MathError, RoundTrip};
+use arb_math::{FeeRates, FeeRole, MathError, RoundTrip};
 use arb_num::Bps;
-use arb_types::{DataQuality, Provenance, QualityFlags};
+use arb_types::{DataQuality, Provenance, QualityFlags, VenueKey};
 use arb_venue::FeeSchedule;
 
 use crate::error::ScanError;
@@ -146,6 +146,87 @@ pub fn round_trip_bps(
         .checked_add(leg_b)
         .map_err(MathError::from)
         .map_err(ScanError::from)
+}
+
+/// Which of two venues carries the round trip's single resting entry, and what
+/// that round trip costs when the dearer venue carries it.
+///
+/// # The problem this solves
+///
+/// [`RoundTrip::ALL_TAKER`] and [`RoundTrip::ALL_MAKER`] price both entries the
+/// same way, so which venue is `a` cannot change the total.
+/// [`RoundTrip::HEDGED_ENTRY`] rests **one** entry and crosses the other, and the
+/// two venues' maker rates are not equal in general, so the same configuration
+/// has *two* totals and [`round_trip_bps`] silently answers with whichever the
+/// caller happened to pass first. On the fixtures shipped here the gap is a basis
+/// point, against an edge of twelve.
+///
+/// # The rule, and why it is this one
+///
+/// Both orderings are priced and the **dearer** is returned, together with the
+/// venue that rests in it. That is not a conservative fudge: the dearer ordering
+/// is a real, fully specified, executable plan — rest on the named venue, cross
+/// the other — so the number still equals the money that leaves the account for
+/// the plan printed next to it. The operator who rests the other leg does
+/// *better* than the row promised, which is the direction `CHARTER` rule 0
+/// requires and the direction the whole product is built to err in.
+///
+/// The alternative rules were both worse. Fixing the resting leg to the short (or
+/// long) side prices a plan chosen by an accident of `assign_sides` rather than by
+/// economics, and it is right by luck half the time. Returning the cheaper
+/// ordering prints the best case as the headline, which is the one thing rule 0
+/// forbids.
+///
+/// # What is deliberately not returned
+///
+/// No claim that the resting order fills. `HEDGED_ENTRY`'s own documentation
+/// records that as its load-bearing assumption, and nothing in this workspace can
+/// measure a fill probability without recorded book data.
+pub fn round_trip_bps_worst_order(
+    round_trip: RoundTrip,
+    a: (VenueKey, FeeRates),
+    b: (VenueKey, FeeRates),
+) -> Result<(Bps, Option<VenueKey>), ScanError> {
+    let a_first = round_trip_bps(round_trip, a.1, b.1)?;
+    // A configuration whose four roles are identical cannot be reordered into a
+    // different total, so it is answered without pricing the mirror — and without
+    // attributing a resting leg, because all-taker rests nothing and all-maker
+    // rests both. `Some` here means "exactly one entry rests, and it is this
+    // one"; anything else would put a venue name against a plan that does not
+    // single that venue out.
+    if round_trip.is_symmetric() {
+        return Ok((a_first, None));
+    }
+    let b_first = round_trip_bps(round_trip, b.1, a.1)?;
+    let (worse, first, second) = if b_first.raw() > a_first.raw() {
+        (b_first, b.0, a.0)
+    } else {
+        // Ties keep `a` — deterministic, so two runs over identical inputs cannot
+        // name different venues and make a diff of two reports unreadable.
+        (a_first, a.0, b.0)
+    };
+    Ok((worse, resting_entry(round_trip, first, second)))
+}
+
+/// The venue whose entry rests, when exactly one of the two entries does.
+///
+/// `first` is the leg priced as `_a`, `second` the leg priced as `_b`. Both are
+/// needed because either role can be the maker one: answering from `first` alone
+/// would name the crossing venue whenever the resting role sits on `_b`.
+///
+/// `None` when both entries rest or neither does. Naming a venue there would
+/// suggest the configuration singles it out when it does not, and a resting leg
+/// the operator cannot act on is noise in a column that exists to be acted on.
+const fn resting_entry(
+    round_trip: RoundTrip,
+    first: VenueKey,
+    second: VenueKey,
+) -> Option<VenueKey> {
+    match (round_trip.entry_a, round_trip.entry_b) {
+        (FeeRole::Maker, FeeRole::Taker) => Some(first),
+        (FeeRole::Taker, FeeRole::Maker) => Some(second),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

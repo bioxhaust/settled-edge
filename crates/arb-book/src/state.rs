@@ -31,6 +31,7 @@ use arb_num::Price;
 
 use crate::error::BookError;
 use crate::ladder::{Ladder, MAX_INPUT_LEVELS};
+use crate::semantics::{audit_snapshot, AuditScope, DeltaVocabulary, SnapshotAudit};
 use crate::sequence::{SeqFact, SeqInput, SeqScheme, SeqTracker};
 
 /// Most deltas we will hold while waiting for a snapshot, per book.
@@ -113,6 +114,12 @@ pub struct BookState {
     discarded_pending: u64,
     /// Replayed deltas that returned an error.
     replay_failures: u64,
+    /// Evidence about whether this venue's sizes really are absolute. See
+    /// [`crate::semantics`]: counted here, judged in `arb-detect`.
+    vocab: DeltaVocabulary,
+    /// The most recent snapshot-versus-ladder comparison, including the ones
+    /// that could not be performed and why. `None` before the first snapshot.
+    last_snapshot_audit: Option<SnapshotAudit>,
 }
 
 impl BookState {
@@ -135,6 +142,8 @@ impl BookState {
             dropped_pending: 0,
             discarded_pending: 0,
             replay_failures: 0,
+            vocab: DeltaVocabulary::default(),
+            last_snapshot_audit: None,
         }
     }
 
@@ -159,6 +168,26 @@ impl BookState {
         let mut new_asks = Ladder::new(Side::Sell);
         new_bids.replace_all(bids)?;
         new_asks.replace_all(asks)?;
+
+        // ---- the audit ---------------------------------------------------
+        // Here and nowhere else, because here is the only place two independent
+        // descriptions of one book exist at the same instant: the ladder we
+        // built from deltas, and the authoritative levels about to replace it.
+        // One line later the evidence is gone for ever.
+        //
+        // Strictly BEFORE the swap and before `reset_to`, both of which destroy
+        // an operand. Placed after `replace_all` so that a snapshot we are about
+        // to reject contributes no evidence — a malformed response says nothing
+        // about what the venue's sizes mean.
+        let scope = self.audit_scope_for(seq);
+        let audit = audit_snapshot(
+            scope,
+            (&self.bids, &self.asks),
+            (&new_bids, &new_asks),
+        );
+        self.vocab.record_audit(&audit);
+        self.last_snapshot_audit = Some(audit);
+
         self.bids = new_bids;
         self.asks = new_asks;
 
@@ -469,6 +498,61 @@ impl BookState {
         self.replay_failures
     }
 
+    /// Cumulative evidence about whether this venue's depth updates really are
+    /// absolute sizes.
+    ///
+    /// Facts, not a verdict: pass them to `arb_detect::assess_depth_semantics`,
+    /// which owns the sample sizes and the tolerances. Reading a raw counter and
+    /// deciding for yourself puts a threshold in the wrong crate
+    /// (`decisions/011`).
+    pub fn depth_vocabulary(&self) -> DeltaVocabulary {
+        self.vocab
+    }
+
+    /// The most recent snapshot-versus-ladder comparison, or `None` before the
+    /// first snapshot.
+    ///
+    /// Carries an [`AuditScope`] that may say the comparison was not possible.
+    /// Check it: the counts inside a non-comparable audit are all zero, which
+    /// reads exactly like agreement.
+    pub fn last_snapshot_audit(&self) -> Option<SnapshotAudit> {
+        self.last_snapshot_audit
+    }
+
+    /// Decide whether the snapshot about to be installed can be compared against
+    /// the ladder we hold, and against what sequence distance.
+    ///
+    /// Must be called before the swap and before `reset_to`: it reads both the
+    /// old cursor and `awaiting_resync`, and both are about to change.
+    ///
+    /// Reasons are tested most-disqualifying first. A book with no ladder cannot
+    /// be compared however good its ids are, and a ladder already known to be
+    /// broken cannot be compared however close its id is.
+    fn audit_scope_for(&self, seq: Option<u64>) -> AuditScope {
+        if !self.initialized {
+            return AuditScope::NotInitialized;
+        }
+        if self.awaiting_resync {
+            return AuditScope::LadderUntrusted;
+        }
+        let theirs = match seq {
+            Some(id) => id,
+            None => return AuditScope::NoSnapshotId,
+        };
+        let ours = match self.seq.cursor() {
+            Some(c) => c.last_id,
+            None => return AuditScope::NoCursor,
+        };
+        match theirs.checked_sub(ours) {
+            Some(id_distance) => AuditScope::Compared { id_distance },
+            // `theirs < ours`: the snapshot describes the past. Not a subtraction
+            // to saturate — a saturated zero here would claim "same position",
+            // which is the one scope that demands exact agreement, so an
+            // out-of-date snapshot would manufacture a contradiction.
+            None => AuditScope::SnapshotBehind { ours, theirs },
+        }
+    }
+
     /// Apply an accepted delta to both ladders.
     ///
     /// VALIDATE-FIRST, then mutate — every level on *both* sides is checked
@@ -491,6 +575,11 @@ impl BookState {
             // Negative absolute size is meaningless, and clamping it to zero
             // would delete a level the venue never asked us to delete.
             if qty.is_negative() {
+                // Recorded before the refusal, because the refusal is the only
+                // place this fact is ever visible. A negative size is proof the
+                // pair was not an absolute size — see
+                // `DeltaVocabulary::negative_sized`.
+                self.vocab.record_negative();
                 return Err(BookError::NegativeQty);
             }
         }
@@ -499,10 +588,20 @@ impl BookState {
         // therefore unreachable today and exist so that a future failure mode
         // added to `Ladder::apply` degrades to "book marked unknown" instead of
         // "book silently half-applied". They are cheap; silence is not.
+        //
+        // The size held is read BEFORE each apply. Read it after and every
+        // update classifies as `overwrote_equal`, because the ladder now holds
+        // the incoming size — the counters would report a feed that never
+        // changes anything, which is the false alarm this measurement exists to
+        // avoid.
         for (price, qty) in &d.bids {
+            let held = self.bids.qty_at(*price);
+            self.vocab.record_update(held, *qty);
             self.bids.apply(*price, *qty)?;
         }
         for (price, qty) in &d.asks {
+            let held = self.asks.qty_at(*price);
+            self.vocab.record_update(held, *qty);
             self.asks.apply(*price, *qty)?;
         }
         // Taken as-is, including `None`: this field means "the exchange time of
@@ -1289,5 +1388,321 @@ mod tests {
             .quality
             .flags
             .contains(QualityFlags::SEQ_GAP));
+    }
+
+    // ---- depth semantics evidence (OPEN.md D2) --------------------------
+    //
+    // These pin the WIRING: that the recorders see what the ladder saw, at the
+    // moment it still means something. The classification itself is tested in
+    // `crate::semantics`.
+
+    #[test]
+    fn a_fresh_book_has_recorded_no_evidence_at_all() {
+        let b = fresh();
+        let v = b.depth_vocabulary();
+        assert_eq!(v.level_updates(), 0);
+        assert_eq!(v.zero_sized(), 0);
+        assert_eq!(v.audits_compared(), 0);
+        assert!(
+            b.last_snapshot_audit().is_none(),
+            "no snapshot has been compared, which is not the same as one that agreed"
+        );
+    }
+
+    #[test]
+    fn applied_updates_are_classified_against_the_size_held_before_them() {
+        let mut b = seeded(Some(100));
+        // Bid 99 held 2: raise it to 5. Bid 98 held 1: lower it to 0.5.
+        // Bid 97 was not held: a new price. Ask 101 held 4: delete it.
+        // Ask 100 held 3: restate 3.
+        assert_eq!(
+            b.apply_delta(delta(
+                mono(101),
+                &[("99", "5"), ("98", "0.5"), ("97", "6")],
+                &[("101", "0"), ("100", "3")],
+            ))
+            .unwrap(),
+            SeqFact::Accepted
+        );
+        let v = b.depth_vocabulary();
+        assert_eq!(v.level_updates(), 5);
+        assert_eq!(v.overwrote_larger(), 1, "99: 2 -> 5");
+        assert_eq!(v.overwrote_smaller(), 1, "98: 1 -> 0.5");
+        assert_eq!(v.overwrote_equal(), 1, "100: 3 -> 3");
+        assert_eq!(v.new_price(), 1, "97 was not held");
+        assert_eq!(v.zero_sized(), 1, "101 deleted");
+        assert_eq!(v.zero_sized_deleted(), 1, "and 101 was really there");
+        assert_eq!(v.negative_sized(), 0);
+    }
+
+    #[test]
+    fn a_refused_delta_records_the_negative_size_and_nothing_else() {
+        let mut b = seeded(Some(100));
+        let bad = Delta {
+            seq: mono(101),
+            bids: vec![(p("99"), q("50"))],
+            asks: vec![(p("100"), Qty::from_raw(-1))],
+            exchange_ts: ex(),
+            observed_at: ts(),
+        };
+        assert!(matches!(b.apply_delta(bad), Err(BookError::NegativeQty)));
+        let v = b.depth_vocabulary();
+        assert_eq!(v.negative_sized(), 1);
+        assert_eq!(
+            v.level_updates(),
+            0,
+            "validate-first refused the whole message, so nothing was applied"
+        );
+    }
+
+    #[test]
+    fn a_buffered_delta_records_nothing_until_it_is_actually_applied() {
+        let mut b = fresh();
+        // Uninitialised, so this is buffered rather than applied.
+        let _ = b.apply_delta(delta(mono(101), &[("99", "1")], &[])).unwrap();
+        assert_eq!(
+            b.depth_vocabulary().level_updates(),
+            0,
+            "a message we held is not a message the ladder saw"
+        );
+        // The snapshot at 100 puts 101 after it, so the replay applies it — and
+        // now it counts, exactly once.
+        b.apply_snapshot(
+            vec![lvl("99", "2")],
+            vec![lvl("100", "1")],
+            Some(100),
+            ex(),
+            ts(),
+        )
+        .unwrap();
+        let v = b.depth_vocabulary();
+        assert_eq!(v.level_updates(), 1);
+        assert_eq!(v.overwrote_smaller(), 1, "the snapshot's 2 became 1");
+    }
+
+    #[test]
+    fn the_first_snapshot_is_not_comparable_and_says_so() {
+        let b = seeded(Some(100));
+        let a = b.last_snapshot_audit().unwrap();
+        assert_eq!(a.scope(), AuditScope::NotInitialized);
+        assert!(!a.scope().compared());
+        assert_eq!(b.depth_vocabulary().audits_compared(), 0);
+    }
+
+    #[test]
+    fn a_snapshot_at_our_own_cursor_is_compared_at_distance_zero() {
+        let mut b = seeded(Some(100));
+        // Re-describe the same book at the same id. Absolute-size semantics
+        // require exact agreement here, and this snapshot agrees.
+        b.apply_snapshot(
+            vec![lvl("99", "2"), lvl("98", "1")],
+            vec![lvl("100", "3"), lvl("101", "4")],
+            Some(100),
+            ex(),
+            ts(),
+        )
+        .unwrap();
+        let a = b.last_snapshot_audit().unwrap();
+        assert_eq!(a.scope(), AuditScope::Compared { id_distance: 0 });
+        assert_eq!(a.compared(), 4);
+        assert_eq!(a.agreed(), 4);
+        assert!(!a.contradicts_at_same_position());
+        let v = b.depth_vocabulary();
+        assert_eq!(v.audits_compared(), 1);
+        assert_eq!(v.audits_at_same_position(), 1);
+        assert_eq!(v.audits_contradicting(), 0);
+    }
+
+    #[test]
+    fn a_level_the_venue_denies_at_our_own_cursor_is_counted_as_a_contradiction() {
+        // The increment-feed signature, end to end: we hold a level the venue
+        // does not, at the same sequence position, inside the snapshot's own
+        // price window. Under absolute-size semantics that level could only be
+        // gone if we had been sent a zero — and we never were.
+        let mut b = seeded(Some(100));
+        b.apply_snapshot(
+            vec![lvl("99", "2"), lvl("98", "1")],
+            // 101 is missing, and 102 keeps the window open past it, so this is
+            // a denial rather than a shallower response.
+            vec![lvl("100", "3"), lvl("102", "5")],
+            Some(100),
+            ex(),
+            ts(),
+        )
+        .unwrap();
+        let a = b.last_snapshot_audit().unwrap();
+        assert_eq!(a.only_ours_inside(), 1);
+        assert!(a.contradicts_at_same_position());
+        assert_eq!(b.depth_vocabulary().audits_contradicting(), 1);
+    }
+
+    #[test]
+    fn a_snapshot_ahead_of_us_is_compared_but_cannot_contradict() {
+        let mut b = seeded(Some(100));
+        // Eight ids of messages we never saw could have changed anything, so a
+        // difference here is ordinary. Counted as compared, never as proof.
+        b.apply_snapshot(
+            vec![lvl("99", "77")],
+            vec![lvl("100", "3")],
+            Some(108),
+            ex(),
+            ts(),
+        )
+        .unwrap();
+        let a = b.last_snapshot_audit().unwrap();
+        assert_eq!(a.scope(), AuditScope::Compared { id_distance: 8 });
+        assert_eq!(a.ours_smaller(), 1);
+        assert!(!a.contradicts_at_same_position());
+        let v = b.depth_vocabulary();
+        assert_eq!(v.audits_compared(), 1);
+        assert_eq!(v.audits_at_same_position(), 0);
+        assert_eq!(v.audits_contradicting(), 0);
+    }
+
+    #[test]
+    fn a_snapshot_describing_the_past_is_not_compared() {
+        let mut b = seeded(Some(500));
+        // A stale REST response. Its differences are our own progress since,
+        // and the reverse subtraction must not saturate to "same position".
+        b.apply_snapshot(
+            vec![lvl("99", "77")],
+            vec![lvl("100", "3")],
+            Some(490),
+            ex(),
+            ts(),
+        )
+        .unwrap();
+        let a = b.last_snapshot_audit().unwrap();
+        assert_eq!(
+            a.scope(),
+            AuditScope::SnapshotBehind {
+                ours: 500,
+                theirs: 490
+            }
+        );
+        assert_eq!(a.compared(), 0);
+        assert_eq!(b.depth_vocabulary().audits_compared(), 0);
+    }
+
+    #[test]
+    fn a_resync_snapshot_is_never_evidence_about_semantics() {
+        // The false positive that would have made this detector useless: every
+        // resync compares a ladder with a known hole in it against a fresh
+        // snapshot, and they differ for reasons that have nothing to do with
+        // what the venue's sizes mean.
+        let mut b = seeded(Some(10));
+        let _ = b.apply_delta(delta(mono(15), &[], &[])).unwrap();
+        assert!(b.awaiting_resync());
+        b.apply_snapshot(
+            // Wildly different from what we hold, and 98 is missing entirely.
+            vec![lvl("99", "999")],
+            vec![lvl("100", "999")],
+            Some(15),
+            ex(),
+            ts(),
+        )
+        .unwrap();
+        let a = b.last_snapshot_audit().unwrap();
+        assert_eq!(a.scope(), AuditScope::LadderUntrusted);
+        assert_eq!(a.compared(), 0);
+        assert_eq!(a.only_ours_inside(), 0);
+        assert_eq!(b.depth_vocabulary().audits_contradicting(), 0);
+    }
+
+    #[test]
+    fn a_snapshot_without_an_id_cannot_be_positioned_and_is_not_compared() {
+        let mut b = seeded(Some(100));
+        b.apply_snapshot(vec![lvl("99", "77")], vec![lvl("100", "3")], None, ex(), ts())
+            .unwrap();
+        let a = b.last_snapshot_audit().unwrap();
+        assert_eq!(a.scope(), AuditScope::NoSnapshotId);
+        assert_eq!(a.compared(), 0);
+    }
+
+    #[test]
+    fn a_book_with_no_cursor_of_its_own_is_not_compared() {
+        // Initialised by an id-less snapshot, so we hold levels but have
+        // sequenced nothing. The next snapshot has an id, but there is nothing
+        // on our side to measure a distance from.
+        let mut b = fresh();
+        b.apply_snapshot(vec![lvl("99", "2")], vec![lvl("100", "3")], None, ex(), ts())
+            .unwrap();
+        assert!(b.seq().cursor().is_none());
+        b.apply_snapshot(
+            vec![lvl("99", "77")],
+            vec![lvl("100", "3")],
+            Some(100),
+            ex(),
+            ts(),
+        )
+        .unwrap();
+        assert_eq!(b.last_snapshot_audit().unwrap().scope(), AuditScope::NoCursor);
+        assert_eq!(b.depth_vocabulary().audits_compared(), 0);
+    }
+
+    #[test]
+    fn a_rejected_snapshot_contributes_no_evidence() {
+        // A malformed response says nothing about what the venue's sizes mean,
+        // so the audit must not run on it — and the previous audit must survive
+        // rather than being replaced by a comparison against garbage.
+        let mut b = seeded(Some(100));
+        b.apply_snapshot(
+            vec![lvl("99", "2"), lvl("98", "1")],
+            vec![lvl("100", "3"), lvl("101", "4")],
+            Some(100),
+            ex(),
+            ts(),
+        )
+        .unwrap();
+        assert_eq!(b.depth_vocabulary().audits_compared(), 1);
+
+        let r = b.apply_snapshot(
+            vec![lvl("90", "1")],
+            vec![lvl("100", "1"), lvl("100", "2")],
+            Some(101),
+            ex(),
+            ts(),
+        );
+        assert!(matches!(r, Err(BookError::DuplicatePrice)));
+        assert_eq!(
+            b.depth_vocabulary().audits_compared(),
+            1,
+            "a refused snapshot must not add evidence"
+        );
+        assert_eq!(
+            b.last_snapshot_audit().unwrap().scope(),
+            AuditScope::Compared { id_distance: 0 }
+        );
+    }
+
+    #[test]
+    fn a_shallow_depth_response_is_not_mistaken_for_broken_semantics() {
+        // The most likely real-world false positive: a REST depth endpoint
+        // returning fewer levels than the stream accumulated. If this
+        // contradicted, every venue with a shallow depth window would be
+        // condemned as an increment feed.
+        let mut b = fresh();
+        b.apply_snapshot(
+            vec![lvl("99", "2"), lvl("98", "1"), lvl("97", "1")],
+            vec![lvl("100", "3"), lvl("101", "4"), lvl("102", "4")],
+            Some(100),
+            ex(),
+            ts(),
+        )
+        .unwrap();
+        // Same id, same touch, just two levels per side instead of three.
+        b.apply_snapshot(
+            vec![lvl("99", "2"), lvl("98", "1")],
+            vec![lvl("100", "3"), lvl("101", "4")],
+            Some(100),
+            ex(),
+            ts(),
+        )
+        .unwrap();
+        let a = b.last_snapshot_audit().unwrap();
+        assert_eq!(a.only_ours_outside(), 2, "97 and 102 are past the edges");
+        assert_eq!(a.only_ours_inside(), 0);
+        assert!(!a.contradicts_at_same_position());
+        assert_eq!(b.depth_vocabulary().audits_contradicting(), 0);
     }
 }

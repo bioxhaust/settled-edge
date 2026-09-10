@@ -31,8 +31,11 @@
 use core::fmt;
 
 use arb_detect::{ClockVerdict, Staleness};
+use arb_math::RoundTrip;
 use arb_num::{Bps, Money, Price, Qty, Rate};
 use arb_types::{DataQuality, PositionSide, QualityFlags, VenueKey};
+
+use crate::persistence::PersistenceEvidence;
 
 /// Why a row is present but not tradeable on its printed number.
 ///
@@ -139,6 +142,71 @@ impl fmt::Display for Unrankable {
     }
 }
 
+/// What one round-trip execution configuration costs, and what the row is worth
+/// under it.
+///
+/// # Why a row carries three of these and not one
+///
+/// The fee assumption is the largest single lever in this product's economics
+/// (`OPEN.md` A6, `decisions/020`). On a 2/5.5 bp schedule the all-taker round
+/// trip is 22 bp and the all-maker one is 8, and at a carry of 1 bp per
+/// settlement that is the difference between holding 7.3 days to break even and
+/// holding 2.7. A row that printed only the all-taker figure was not merely
+/// pessimistic — it hid the biggest decision the operator gets to make, and
+/// `decisions/023` step 3 exists because of it.
+///
+/// The three are not a menu of equally reachable plans, and the labels say so:
+/// [`RoundTrip::ALL_TAKER`] is what an operator gets by default,
+/// [`RoundTrip::HEDGED_ENTRY`] is what they can actually reach, and
+/// [`RoundTrip::ALL_MAKER`] is a **bound** — it requires every leg to rest and
+/// fill on both venues in both directions. A row whose net is acceptable only in
+/// the last one is a row whose thesis is an execution assumption rather than a
+/// funding divergence, which is what [`Opportunity::pays_only_as_maker`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoundTripCost {
+    /// The configuration priced here.
+    pub round_trip: RoundTrip,
+    /// The leg whose **entry** rests while the other leg's entry crosses.
+    ///
+    /// `None` when the configuration prices both entries the same way, so there
+    /// is no asymmetry to attribute — all-taker rests nothing and all-maker rests
+    /// both. `Some` identifies the venue the resting order is placed on, and it
+    /// is load-bearing rather than decorative: the two venues' maker rates and
+    /// their taker-minus-maker savings differ, so "post one leg" is not one
+    /// number until you say which leg. See [`crate::fees::round_trip_bps_worst_order`].
+    pub resting_entry: Option<VenueKey>,
+    /// Four fee legs under this configuration: enter both, exit both.
+    pub fee_bps: Bps,
+    /// `fee_bps` plus the row's depth cost, which is the same under every
+    /// configuration — walking a ladder costs what it costs regardless of the fee
+    /// role we are charged.
+    pub cost_bps: Bps,
+    /// Gross annualised receipt minus this configuration's cost, amortised over
+    /// the configured horizon, with the borrow term of a reverse carry already
+    /// applied.
+    ///
+    /// The borrow is applied here and not once outside, because subtracting it
+    /// from only the configured configuration would have left the other two
+    /// quietly omitting a cost that can invert the sign (`OPEN.md` A1).
+    pub net_apr: Rate,
+    /// The same net, recomputed from what the legs' settled records **actually
+    /// paid** instead of from the currently published rates.
+    ///
+    /// `None` when any funding leg has no record, which is the same condition
+    /// that raises [`arb_types::QualityFlags::RATE_HISTORY_MISSING`]. Not a
+    /// forecast: it is the identical arithmetic over a measured mean, and it is
+    /// here so a row priced on a rate spike cannot look like a row priced on a
+    /// rate that has been paying for a month.
+    pub net_apr_realised: Option<Rate>,
+    /// Settlements the carry must survive to cover this configuration's round
+    /// trip. `None` when the legs settle on different intervals, when neither
+    /// funds, or when the carry never covers the cost.
+    ///
+    /// **This is the field the lever is visible in.** It is the same row, the
+    /// same market and the same size; only the execution assumption moved.
+    pub periods_to_breakeven: Option<u64>,
+}
+
 /// One side of the pair, priced for the size the pair actually supports.
 #[derive(Debug, Clone)]
 pub struct OppLeg {
@@ -178,6 +246,15 @@ pub struct OppLeg {
     pub clock: ClockVerdict,
     /// Painted-depth score, 0 = clean.
     pub paint_score: u8,
+    /// What this leg's settled funding record measures.
+    ///
+    /// `None` for a leg that has no funding at all (spot receives none, and zero
+    /// is the honest figure there) and `None` for a funding leg whose record is
+    /// absent or empty — the case
+    /// [`arb_types::QualityFlags::RATE_HISTORY_MISSING`] announces. The two are
+    /// distinguishable by whether the flag is set, and they must not be conflated
+    /// with a record full of zeros: see [`crate::persistence::evidence`].
+    pub persistence: Option<PersistenceEvidence>,
     /// Combined quality for this leg.
     pub quality: DataQuality,
 }
@@ -199,24 +276,53 @@ pub struct Opportunity {
     /// published rates — see [`crate::scan`] for why those are different numbers
     /// whenever the intervals differ.
     pub gross_apr: Rate,
-    /// Four fee legs: enter both, exit both.
+    /// The same sum, taken over what each leg's settled record **actually paid**
+    /// rather than over what each venue is publishing now.
+    ///
+    /// `None` when any funding leg has no record — the row then makes no claim
+    /// about the past at all, which is exactly the state
+    /// [`arb_types::QualityFlags::RATE_HISTORY_MISSING`] is for. A leg with no
+    /// funding contributes exactly zero here, for the same reason it contributes
+    /// zero to `gross_apr`: spot receives no funding, and that is a measurement
+    /// rather than a gap.
+    ///
+    /// Read beside `gross_apr` this is the difference between a row backed by
+    /// thirty days of one-signed funding and a row backed by nothing (`OPEN.md`
+    /// A5). It is **not** a forecast and nothing here ranks on it.
+    pub realised_gross_apr: Option<Rate>,
+    /// Four fee legs: enter both, exit both. Under
+    /// [`crate::config::ScanConfig::round_trip`] — the *configured* configuration,
+    /// which is also one of [`Opportunity::costs`] unless the operator configured
+    /// a fifth one of their own.
     pub fee_bps: Bps,
-    /// Depth cost on both legs, entry and exit.
+    /// Depth cost on both legs, entry and exit. Independent of the fee
+    /// configuration, which is why it is not repeated inside
+    /// [`RoundTripCost`].
     pub slippage_bps: Bps,
     /// `fee_bps + slippage_bps`. What the round trip costs once, in bps of
-    /// notional.
+    /// notional, under the configured configuration.
     pub cost_bps: Bps,
     /// Gross annualised receipt minus the round-trip cost amortised over the
     /// configured holding horizon. **This is the number that must equal the money
     /// that arrives.**
     pub net_apr: Rate,
+    /// The same row priced under each of [`RoundTrip::REPORTED`], most expensive
+    /// first.
+    ///
+    /// Carried in addition to the flat fields above, not instead of them: the flat
+    /// fields answer "what does the configuration I asked for cost", and these
+    /// answer "what is the execution assumption worth". Both are computed by one
+    /// code path, so they cannot drift — asserted by test.
+    pub costs: [RoundTripCost; 3],
     /// Margin for both legs together.
     pub margin: Money,
     /// The nearer of the two liquidation distances — the one that actually ends
     /// the trade. `None` when neither leg can be liquidated.
     pub distance_to_liq: Option<Bps>,
     /// How long the position must be held for the funding received to cover the
-    /// round trip. `None` when the carry never covers it.
+    /// round trip, under the configured configuration. `None` when the carry never
+    /// covers it. [`Opportunity::costs`] carries the same count for each of the
+    /// three reported configurations, and the spread between them is the lever.
     pub periods_to_breakeven: Option<u64>,
     /// Combined quality across both legs.
     pub quality: DataQuality,
@@ -233,6 +339,77 @@ impl Opportunity {
     /// measured, `quality.is_rankable()` catches what the layers below flagged.
     pub fn is_rankable(&self) -> bool {
         self.blocked.is_empty() && self.quality.is_rankable()
+    }
+
+    /// This row priced under one named configuration, if it is among the three
+    /// reported.
+    ///
+    /// `None` rather than a fallback for an unreported configuration: silently
+    /// answering with the nearest one would put a number under a label it does not
+    /// belong to, and that is the one failure mode a three-column table introduces
+    /// that a one-column table could not have.
+    pub fn cost_of(&self, round_trip: RoundTrip) -> Option<RoundTripCost> {
+        self.costs.iter().copied().find(|c| c.round_trip == round_trip)
+    }
+
+    /// The dearest of the three reported configurations.
+    ///
+    /// Selected by comparing costs rather than by taking a known index, so it
+    /// stays correct if a venue's schedule makes the usual ordering false — a
+    /// maker rate above a taker rate is refused upstream, but a *pair* of
+    /// schedules can still reorder the middle configuration against the ends.
+    pub fn dearest(&self) -> RoundTripCost {
+        let mut worst = self.costs[0];
+        for c in &self.costs[1..] {
+            if c.cost_bps.raw() > worst.cost_bps.raw() {
+                worst = *c;
+            }
+        }
+        worst
+    }
+
+    /// The cheapest of the three reported configurations. Almost always the
+    /// all-maker bound, which is a bound and not a plan.
+    pub fn cheapest(&self) -> RoundTripCost {
+        let mut best = self.costs[0];
+        for c in &self.costs[1..] {
+            if c.cost_bps.raw() < best.cost_bps.raw() {
+                best = *c;
+            }
+        }
+        best
+    }
+
+    /// True when this row only pays under a cheaper fee configuration than the
+    /// dearest reported one.
+    ///
+    /// The row's thesis is then an **execution assumption**, not a funding
+    /// divergence: it needs orders to rest and fill, on both venues, and nothing
+    /// in this workspace measures fill probability. Reported rather than blocked —
+    /// the arithmetic is right and the trade may well be right; what would be
+    /// wrong is presenting it as the same kind of row as one that pays even when
+    /// every leg crosses the spread.
+    pub fn pays_only_as_maker(&self) -> bool {
+        !self.dearest().net_apr.is_positive() && self.cheapest().net_apr.is_positive()
+    }
+
+    /// True when the legs' settled records would have paid the **opposite sign**
+    /// to what the currently published rates promise.
+    ///
+    /// A threshold-free comparison, deliberately: any rule of the form "flag a
+    /// row whose realised return is more than X% below its published one" needs an
+    /// X that nothing here has measured, whereas a sign disagreement needs none.
+    /// `false` when no record exists — absence of evidence is reported by
+    /// [`arb_types::QualityFlags::RATE_HISTORY_MISSING`], and answering `true`
+    /// here would make a missing record look like a contradicted one.
+    pub fn record_contradicts_sign(&self) -> bool {
+        match self.realised_gross_apr {
+            None => false,
+            Some(realised) => {
+                self.gross_apr.is_positive() && !realised.is_positive()
+                    || self.gross_apr.is_negative() && !realised.is_negative()
+            }
+        }
     }
 
     /// Sort key: best net first, and never a blocked row above an unblocked one.

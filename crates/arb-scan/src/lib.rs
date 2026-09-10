@@ -43,11 +43,16 @@ pub mod error;
 pub mod fees;
 pub mod leg;
 pub mod opportunity;
+pub mod persistence;
 pub mod scan;
 
 pub use config::ScanConfig;
 pub use error::{PairRefusal, ScanError};
-pub use fees::{bridge, bridge_with_quality, round_trip_bps, tier_flags, BridgedFees};
+pub use fees::{
+    bridge, bridge_with_quality, round_trip_bps, round_trip_bps_worst_order, tier_flags,
+    BridgedFees,
+};
 pub use leg::LegInput;
-pub use opportunity::{OppLeg, Opportunity, Unrankable};
+pub use opportunity::{OppLeg, Opportunity, RoundTripCost, Unrankable};
+pub use persistence::{evidence, PersistenceEvidence};
 pub use scan::{pair_check, price_pair, scan};

@@ -79,7 +79,9 @@ use arb_venue::{ExchangeAdapter, FeeSchedule, VenueError};
 use crate::clock::Clock;
 use crate::http::{Query, Transport};
 use crate::json::Json;
-use crate::venues::{transport_error, wire, wire_error};
+use crate::venues::{
+    dec_field, int_field, opt_dec_field, str_field, transport_error, wire, wire_error,
+};
 
 /// Bybit's production API host.
 pub const BASE_URL: &str = "https://api.bybit.com";
@@ -324,43 +326,6 @@ fn list_of(doc: &Json) -> Result<&[Json], VenueError> {
         .and_then(|r| r.field("list"))
         .and_then(|l| l.array())
         .map_err(wire_error)
-}
-
-/// An integer field, whether the venue quoted it or not.
-fn int_field(node: &Json, key: &str) -> Result<i64, VenueError> {
-    let text = node.field(key).and_then(|v| v.decimal()).map_err(wire_error)?;
-    text.parse::<i64>()
-        .map_err(|_| wire(format!("field {key:?} is not an integer: {text:?}")))
-}
-
-/// A decimal field as text, ready for `arb-num`.
-fn dec_field<'a>(node: &'a Json, key: &str) -> Result<&'a str, VenueError> {
-    node.field(key).and_then(|v| v.decimal()).map_err(wire_error)
-}
-
-/// A field that must be a JSON string: a symbol, an asset code, a status.
-///
-/// Deliberately stricter than [`dec_field`]. `decimal()` would accept `"Trading"`
-/// and `"BTCUSDT"` happily, since it only hands the text back — so using it here
-/// would mean a `status` that became a bare enum number, or a `symbol` that became
-/// an integer id, parsed without complaint and then compared against a string it
-/// could never equal. That failure would surface as "Bybit does not list BTCUSDT",
-/// which is the least informative possible symptom.
-fn str_field<'a>(node: &'a Json, key: &str) -> Result<&'a str, VenueError> {
-    node.field(key).and_then(|v| v.string()).map_err(wire_error)
-}
-
-/// A decimal field that the venue may leave blank.
-///
-/// Bybit writes `""` rather than `null` for inapplicable fields (`basisRate` and
-/// `predictedDeliveryPrice` on a perpetual, for instance), so absence has two
-/// spellings and [`Json::is_absent`] knows both.
-fn opt_dec_field<'a>(node: &'a Json, key: &str) -> Result<Option<&'a str>, VenueError> {
-    match node.get(key) {
-        None => Ok(None),
-        Some(v) if v.is_absent() => Ok(None),
-        Some(v) => v.decimal().map(Some).map_err(wire_error),
-    }
 }
 
 /// Turn `instruments-info` into instrument specs, plus the next page cursor.

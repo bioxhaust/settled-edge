@@ -6,7 +6,7 @@
 //! on the wrong quantity" and "the notional was computed from the wrong side"
 //! into compile errors rather than a number that is quietly 4 bps optimistic.
 
-use crate::decimal::{format_scaled, parse_scaled};
+use crate::decimal::{format_scaled, parse_scaled, parse_scaled_rounded};
 use crate::error::NumError;
 use crate::muldiv::mul_div;
 use crate::round::RoundMode;
@@ -68,6 +68,20 @@ macro_rules! fixed_i128 {
             /// Refuses to truncate: see [`NumError::PrecisionLoss`].
             pub fn parse(s: &str) -> Result<Self, NumError> {
                 parse_scaled(s, SCALE_DIGITS).map(Self)
+            }
+
+            /// Parse an exchange-supplied decimal string, rounding digits below
+            /// scale 1e12 rather than refusing them.
+            ///
+            /// [`Self::parse`] is the correct function almost everywhere, and the
+            /// refusal it performs is load-bearing: more decimal places than this
+            /// type carries usually means the field was misidentified, not that the
+            /// venue is being precise. Reach for this only when a specific field's
+            /// published precision genuinely exceeds [`SCALE_DIGITS`] — see
+            /// [`crate::parse_scaled_rounded`], which names the one such field in
+            /// this workspace today and states the resulting error bound.
+            pub fn parse_rounded(s: &str, mode: RoundMode) -> Result<Self, NumError> {
+                parse_scaled_rounded(s, SCALE_DIGITS, mode).map(Self)
             }
 
             /// Checked addition.

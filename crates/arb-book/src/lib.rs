@@ -16,8 +16,13 @@
 //! drift wrong by a few percent, top-of-book would still look plausible, and
 //! the twelve basis points we trade on would be noise. The only defence is
 //! measurement: replay a recorded stream against a REST snapshot and compare.
-//! Until someone does that, the flag on every book built from a fixture stays
-//! [`arb_types::Provenance::SynthesizedUnverified`].
+//! [`semantics`] is that comparison, plus the cheaper evidence available from
+//! the stream alone; it counts and never judges, and
+//! `arb_detect::assess_depth_semantics` turns the counts into a verdict. The
+//! assumption is now *measurable*, which is not the same as measured: until
+//! someone runs a recorded feed through it, the flag on every book built from a
+//! fixture stays [`arb_types::Provenance::SynthesizedUnverified`].
+
 //!
 //! **2. A sequence gap means the ladder is UNKNOWN, not merely late.**
 //! There is no "catch up" from a gap. A missed delta may have deleted the level
@@ -35,11 +40,13 @@
 
 pub mod error;
 pub mod ladder;
+pub mod semantics;
 pub mod sequence;
 pub mod state;
 
 pub use error::BookError;
 pub use ladder::{Ladder, MAX_INPUT_LEVELS, MAX_LEVELS};
+pub use semantics::{AuditScope, DeltaVocabulary, SnapshotAudit};
 pub use sequence::{
     SeqCursor, SeqFact, SeqInput, SeqScheme, SeqTracker, RESET_BACKWARD_JUMP, RESET_LOW_ID,
 };

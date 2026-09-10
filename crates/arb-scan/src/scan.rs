@@ -42,7 +42,7 @@ use arb_detect::{age_of, assess_age, assess_paint, assess_skew, is_crossed, Cloc
 use arb_math::{
     annual_borrow_cost, executable_price, liquidation_price, margin_required,
     max_size_within_slippage, net_apr_after_borrow, net_apr_over_horizon, periods_to_breakeven,
-    round_down_to_lot, slippage_bps, CarryLeg, LiquidationInputs, MathError,
+    round_down_to_lot, slippage_bps, CarryLeg, FeeRates, LiquidationInputs, MathError, RoundTrip,
 };
 use arb_num::{Bps, Money, Price, Qty, Rate, RoundMode};
 use arb_types::{
@@ -52,9 +52,9 @@ use arb_types::{
 
 use crate::config::ScanConfig;
 use crate::error::{PairRefusal, ScanError};
-use crate::fees::{bridge_with_quality, round_trip_bps};
+use crate::fees::{bridge_with_quality, round_trip_bps_worst_order};
 use crate::leg::LegInput;
-use crate::opportunity::{OppLeg, Opportunity, Unrankable};
+use crate::opportunity::{OppLeg, Opportunity, RoundTripCost, Unrankable};
 
 /// Whether two legs can form a trade at all.
 ///
@@ -460,59 +460,93 @@ pub fn price_pair(a: &LegInput, b: &LegInput, cfg: &ScanConfig) -> Result<Opport
         }
     }
 
-    // Four fee legs.
+    // Four fee legs, in each of the three configurations the report prints.
     let short_fees = bridge_with_quality(short.fees, short.fee_quality)?;
     let long_fees = bridge_with_quality(long.fees, long.fee_quality)?;
-    let fee_bps = round_trip_bps(cfg.round_trip, short_fees.rates, long_fees.rates)?;
 
     // Depth cost on both legs, entry and exit. The doubling is the mirror
-    // assumption stated in the module docs.
+    // assumption stated in the module docs. Independent of the fee configuration:
+    // walking a ladder costs what it costs whichever role we are charged.
     let one_way = short_leg.slippage.checked_add(long_leg.slippage)?;
     let slippage_bps_total = one_way.checked_add(one_way)?;
-    let cost_bps = fee_bps.checked_add(slippage_bps_total)?;
 
-    let net_apr = net_apr_over_horizon(gross_apr, cost_bps, cfg.horizon)?;
-
-    // Borrow cost on a reverse carry, and the two ways it can go.
+    // Borrow cost on a reverse carry, and the three states it can be in.
     //
     // A short **spot** leg means selling the base asset we do not own, which means
     // borrowing it. Cash-and-carry (long spot, short perp) owns the spot and needs
     // no borrow; only the reverse carry a negative funding rate calls for does. The
     // cost is not small: a CEX margin borrow annualises into the tens of percent
-    // against an edge of twelve basis points, so it can invert the sign of the
-    // number above (`OPEN.md` A1, `decisions/023`).
+    // against an edge of twelve basis points, so it can invert the sign of every
+    // net below (`OPEN.md` A1, `decisions/023`).
     //
-    // - With a borrow snapshot, charge it as an **annual** rate via
-    //   `net_apr_after_borrow` — never amortised into the round trip, which would
-    //   divide by the horizon it should be multiplied by (`arb_math::borrow`).
-    // - Without one, the term is missing and the sign is in doubt, so the row is
-    //   blocked with `BORROW_COST_UNKNOWN` rather than ranked on a cost it never
-    //   charged. `net_apr` is left at its pre-borrow value — the block is the
-    //   honest signal; subtracting an unknown is not an option.
+    // Resolved **once**, before the configurations are priced, and then applied to
+    // each of them. Subtracting it from only the configured configuration would
+    // have left the other two omitting a term large enough to change their sign,
+    // and those two are exactly the columns the operator is being invited to
+    // compare.
     let mut carry_flags = QualityFlags::NONE;
-    let net_apr = if short.kind().is_perp() {
-        net_apr
+    let borrow = if short.kind().is_perp() {
+        BorrowTerm::NotRequired
     } else {
         match short.borrow.as_ref() {
-            Some(snap) => net_apr_after_borrow(net_apr, annual_borrow_cost(snap)?)?,
+            Some(snap) => BorrowTerm::Known(annual_borrow_cost(snap)?),
             None => {
                 carry_flags = carry_flags.union(QualityFlags::BORROW_COST_UNKNOWN);
                 blocked.push(Unrankable::BorrowCostUnknown(short.vkey()));
-                net_apr
+                BorrowTerm::Unknown
             }
         }
     };
 
-    // Rate history. A funding leg with no settled-rate history makes `net_apr` a
+    // Rate history. A funding leg with no settled-rate record makes `net_apr` a
     // conditional — "this is the return *if* the rate holds" — rather than a
     // forecast. That conditional is honestly useful, so this warns rather than
     // blocks (`OPEN.md` A5); the report's job is to state the condition. A leg with
-    // an empty history is as unmeasured as one with none.
+    // an empty record is as unmeasured as one with none.
+    //
+    // What changed in round 2 is only what happens *after* the flag: the record is
+    // now measured onto the row (`short_leg.persistence`, `long_leg.persistence`,
+    // `realised_gross_apr`) instead of being reduced to the flag's single bit. A
+    // row behind which thirty settlements of one sign stand and a row behind which
+    // nothing stands were previously identical apart from that bit.
     for leg in [short, long] {
         if leg.funding.is_some() && leg.history.as_ref().is_none_or(|h| h.is_empty()) {
             carry_flags = carry_flags.union(QualityFlags::RATE_HISTORY_MISSING);
         }
     }
+
+    // What the two records would have paid, summed the same way `gross_apr` is:
+    // per leg, after the sign law, never as a difference of published rates. `None`
+    // as soon as one funding leg has no record — a half-measured sum is not a
+    // measurement, and averaging over the leg we happen to have would make the row
+    // look better or worse than either.
+    let realised_gross_apr = realised_gross(short, &short_leg, long, &long_leg)?;
+
+    let costing = RowCosting {
+        short,
+        long,
+        short_rates: short_fees.rates,
+        long_rates: long_fees.rates,
+        slippage_bps: slippage_bps_total,
+        gross_apr,
+        realised_gross_apr,
+        borrow,
+        cfg,
+    };
+
+    // Named rather than iterated over `RoundTrip::REPORTED`, so the row's three
+    // columns are visible here as three columns. `the_row_reports_exactly_the_three_configurations_arb_math_names`
+    // asserts this array is that constant, so adding a fourth configuration
+    // upstream breaks a test rather than silently going unreported.
+    let costs = [
+        costing.profile(RoundTrip::ALL_TAKER)?,
+        costing.profile(RoundTrip::HEDGED_ENTRY)?,
+        costing.profile(RoundTrip::ALL_MAKER)?,
+    ];
+
+    // The configured configuration, through the same code path as the three above
+    // so the flat fields and the array cannot disagree about the same assumption.
+    let configured = costing.profile(cfg.round_trip)?;
 
     let margin = short_leg.margin.checked_add(long_leg.margin)?;
 
@@ -525,11 +559,6 @@ pub fn price_pair(a: &LegInput, b: &LegInput, cfg: &ScanConfig) -> Result<Opport
         (None, Some(l)) => Some(l),
         (None, None) => None,
     };
-
-    // Breakeven only where "a period" means the same thing on both legs.
-    // Otherwise the count would be in a mixed unit, and a number in no unit is
-    // worse than an absent one.
-    let periods = breakeven_periods(short, long, cost_bps)?;
 
     // The borrow and history verdicts are pair-level — they depend on which leg
     // ended up short — so they are folded in here rather than in `assess_leg`.
@@ -544,16 +573,132 @@ pub fn price_pair(a: &LegInput, b: &LegInput, cfg: &ScanConfig) -> Result<Opport
         size,
         notional: long_notional,
         gross_apr,
-        fee_bps,
+        realised_gross_apr,
+        fee_bps: configured.fee_bps,
         slippage_bps: slippage_bps_total,
-        cost_bps,
-        net_apr,
+        cost_bps: configured.cost_bps,
+        net_apr: configured.net_apr,
+        costs,
         margin,
         distance_to_liq,
-        periods_to_breakeven: periods,
+        periods_to_breakeven: configured.periods_to_breakeven,
         quality,
         blocked,
     })
+}
+
+/// The borrow leg of a reverse carry, in the only three states it can be in.
+///
+/// Three and not two, because "no borrow is needed" and "a borrow is needed and
+/// nobody quoted it" both subtract nothing and mean opposite things. Collapsing
+/// them into `Option<Rate>` would have made a missing cost indistinguishable from
+/// an absent one at every call site — everything summed into a row must be either
+/// known or admitted unknown, and there is no third state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BorrowTerm {
+    /// The short leg is a perp. Nothing is borrowed, so the term is zero and that
+    /// zero is **measured**.
+    NotRequired,
+    /// The short leg is spot and its borrow rate was quoted.
+    Known(Rate),
+    /// The short leg is spot and no borrow rate accompanies it. Every net computed
+    /// from here omits a cost large enough to invert its sign, which is why the row
+    /// is blocked rather than warned.
+    Unknown,
+}
+
+impl BorrowTerm {
+    /// Charge the borrow against an annualised net.
+    ///
+    /// `Unknown` returns the net unchanged, and that is the whole reason
+    /// [`Unrankable::BorrowCostUnknown`] exists: the number left here is knowingly
+    /// missing a term, and the block — not a silent estimate — is what says so.
+    fn apply(self, net: Rate) -> Result<Rate, ScanError> {
+        match self {
+            BorrowTerm::NotRequired | BorrowTerm::Unknown => Ok(net),
+            BorrowTerm::Known(cost) => Ok(net_apr_after_borrow(net, cost)?),
+        }
+    }
+}
+
+/// Everything a row's economics depend on **except** the execution configuration.
+///
+/// Bundled so all four figures the row prints — the three reported configurations
+/// and the configured one — are produced by a single code path over a single set
+/// of inputs. Two paths would be free to disagree about the slippage, the horizon
+/// or the borrow, and an operator reading the columns side by side would take that
+/// disagreement for the lever the columns exist to show.
+struct RowCosting<'a> {
+    short: &'a LegInput,
+    long: &'a LegInput,
+    short_rates: FeeRates,
+    long_rates: FeeRates,
+    slippage_bps: Bps,
+    gross_apr: Rate,
+    realised_gross_apr: Option<Rate>,
+    borrow: BorrowTerm,
+    cfg: &'a ScanConfig,
+}
+
+impl RowCosting<'_> {
+    /// Price this row under one execution configuration.
+    fn profile(&self, round_trip: RoundTrip) -> Result<RoundTripCost, ScanError> {
+        // The worst of the two leg orders, for the reason `round_trip_bps_worst_order`
+        // gives: an asymmetric configuration has two totals and the cheaper one is
+        // the operator's best case, not the row's promise.
+        let (fee_bps, resting_entry) = round_trip_bps_worst_order(
+            round_trip,
+            (self.short.vkey(), self.short_rates),
+            (self.long.vkey(), self.long_rates),
+        )?;
+        let cost_bps = fee_bps.checked_add(self.slippage_bps)?;
+        let net = |gross: Rate| -> Result<Rate, ScanError> {
+            self.borrow
+                .apply(net_apr_over_horizon(gross, cost_bps, self.cfg.horizon)?)
+        };
+        Ok(RoundTripCost {
+            round_trip,
+            resting_entry,
+            fee_bps,
+            cost_bps,
+            net_apr: net(self.gross_apr)?,
+            // The identical arithmetic over the measured mean instead of the
+            // published snapshot. `None` propagates rather than defaulting: a
+            // realised net computed from half a record is not a realised net.
+            net_apr_realised: match self.realised_gross_apr {
+                Some(realised) => Some(net(realised)?),
+                None => None,
+            },
+            periods_to_breakeven: breakeven_periods(self.short, self.long, cost_bps)?,
+        })
+    }
+}
+
+/// Sum of what the two legs' settled records would have paid, on the sides we
+/// hold.
+///
+/// `None` as soon as a leg that *funds* has no measured record. A leg that does not
+/// fund contributes exactly zero, the same measured zero it contributes to
+/// `gross_apr`: spot receives no funding, and that is knowledge rather than a gap.
+fn realised_gross(
+    short: &LegInput,
+    short_leg: &OppLeg,
+    long: &LegInput,
+    long_leg: &OppLeg,
+) -> Result<Option<Rate>, ScanError> {
+    let mut total = Rate::ZERO;
+    for (leg, priced) in [(short, short_leg), (long, long_leg)] {
+        match (leg.funding.as_ref(), priced.persistence.as_ref()) {
+            // Funds, and we measured its record.
+            (Some(_), Some(e)) => total = total.checked_add(e.realised_annual_receipt)?,
+            // Funds, and we did not. `RATE_HISTORY_MISSING` is already set.
+            (Some(_), None) => return Ok(None),
+            // Does not fund: a measured zero, added explicitly rather than skipped
+            // so the reasoning is on the page.
+            (None, _) => total = total.checked_add(Rate::ZERO)?,
+        }
+    }
+    Ok(Some(total))
 }
 
 /// Walk one leg's book for `size` and assemble its row fragment.
@@ -595,6 +740,20 @@ fn price_leg(
         .combine(walk_quality(leg, walk.flags))
         .with_flags(flags);
 
+    // What this leg's settled record measures, on the side we actually hold and at
+    // the venue's own settlement interval. `None` for a leg with no funding — spot
+    // has no record to have — and `None` for a funding leg whose record is absent
+    // or empty, which is the state `RATE_HISTORY_MISSING` announces at pair level.
+    //
+    // The interval comes from the funding snapshot rather than from the record's
+    // own stamps: a record with a hole spans more time than it observed, and
+    // dividing its span by its entry count would invent a longer interval and a
+    // smaller annualised figure.
+    let persistence = match (leg.funding.as_ref(), leg.history.as_ref()) {
+        (Some(f), Some(h)) => crate::persistence::evidence(h, f.interval, side)?,
+        _ => None,
+    };
+
     Ok(OppLeg {
         vkey: leg.vkey(),
         side,
@@ -611,6 +770,7 @@ fn price_leg(
         funding_age,
         clock,
         paint_score,
+        persistence,
         quality,
     })
 }

@@ -130,8 +130,21 @@ pub fn borrow_rate_over(
 /// Two roundings, both upward: once in [`borrow_rate_over`] and once converting
 /// the rate to money. Both run against us, so the figure is at or above the true
 /// cost and never below it — the same direction, and the same argument, as
-/// `margin_required` (`OPEN.md` C3). The bound is roughly two units in the last
-/// place at scale 1e12, which on a 1,000,000 USDT principal is a fifth of a cent.
+/// `margin_required` (`OPEN.md` C3).
+///
+/// The bound is **relative, not two ulps**. An earlier revision of this paragraph
+/// said "roughly two units in the last place at scale 1e12, which on a 1,000,000
+/// USDT principal is a fifth of a cent", and both halves of that were wrong. The
+/// first rounding lands on the *rate*, so the principal magnifies it: the bound is
+/// about `1e-12` relative, plus one ulp of money. Measured on a 7h horizon of a
+/// daily borrow — chosen because `7/24` has a remainder at scale 1e12 — a
+/// 1,000,000 USDT principal is overcharged by `3.33e-7` USDT, which is a third of
+/// one ten-thousandth of a cent, and *not* a fifth of a cent. Pinned by
+/// `the_two_rounding_overcharge_is_relative_to_the_principal`.
+///
+/// The direction was safe both before and after, which is precisely why the wrong
+/// figure survived being written down: `OPEN.md` F1 is the lesson that a claim
+/// erring against ourselves still hides better than one erring for us.
 ///
 /// A negative principal is refused: a borrow of negative size is a deposit, and
 /// this function would price it as revenue.
@@ -348,6 +361,48 @@ mod tests {
     }
 
     #[test]
+    fn the_two_rounding_overcharge_is_relative_to_the_principal() {
+        // The bound `borrow_cost` documents, as arithmetic. Written because the
+        // figure the docs used to carry — "two ulps, a fifth of a cent on a
+        // million" — was wrong in both halves and had never been re-derived.
+        //
+        // A 7h horizon on a daily interval, because 7/24 has a remainder:
+        //   over_true = 0.0001 * 25_200_000 / 86_400_000 = 7/240_000
+        //             = 0.0000291666666666...
+        //   rounded up at 1e12 -> 0.000029166667, raw 29_166_667.
+        let seven_h = Millis::from_secs(7 * 3600);
+        let over = borrow_rate_over(rate("0.0001"), BorrowInterval::DAILY, seven_h).expect("ok");
+        assert_eq!(over, Rate::from_raw(29_166_667));
+
+        // On a 1,000,000 principal the reported cost is exactly
+        //   1_000_000 * 0.000029166667 = 29.166667
+        // while the true cost, itself rounded up, is
+        //   1_000_000 * 7/240_000 = 29.1666666666... -> 29.166666666667.
+        let reported =
+            borrow_cost(money("1000000"), rate("0.0001"), BorrowInterval::DAILY, seven_h)
+                .expect("ok");
+        let true_up = Money::from_raw(29_166_666_666_667);
+        assert_eq!(reported, Money::from_raw(29_166_667_000_000));
+        let over_charge = reported.checked_sub(true_up).expect("ok");
+        assert_eq!(over_charge, Money::from_raw(333_333));
+
+        // Two ulps would be raw 2. The real figure is 333_333 raw, i.e. 3.33e-7
+        // USDT — six orders of magnitude above the "two ulps" claim, and three
+        // below "a fifth of a cent" (raw 2_000_000_000). Both old figures were
+        // wrong; only one of them was wrong in the direction that matters, and
+        // neither was a number anybody had computed.
+        assert!(over_charge > Money::from_raw(2));
+        assert!(over_charge < Money::from_raw(2_000_000_000));
+
+        // Relative, so it scales: a hundredth of the principal is overcharged by
+        // a hundredth as much, up to the reference's own round-up.
+        let hundredth =
+            borrow_cost(money("10000"), rate("0.0001"), BorrowInterval::DAILY, seven_h)
+                .expect("ok");
+        assert_eq!(hundredth.raw() * 100, reported.raw());
+    }
+
+    #[test]
     fn a_negative_principal_is_refused_rather_than_priced_as_a_deposit() {
         let negative = Money::ZERO.checked_sub(money("1")).expect("ok");
         assert_eq!(
@@ -426,3 +481,4 @@ mod tests {
         assert_eq!(annual_borrow_cost(&snap).expect("ok"), rate("0.0365"));
     }
 }
+

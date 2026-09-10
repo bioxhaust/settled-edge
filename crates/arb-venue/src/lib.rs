@@ -56,7 +56,8 @@ pub use execution::{
     OrderState, OrderStatus, Reconcile, TimeInForce, Unwind, VenueOrderId,
 };
 pub use fixture::{
-    parse_fixture, FixtureRecord, FundingFixture, IntervalSource, RateSource, UNVERIFIED_HEADER,
+    parse_fixture, BorrowFixture, FixtureRecord, FundingFixture, IntervalSource, RateSource,
+    UNVERIFIED_HEADER,
 };
 pub use fixture_adapter::FixtureAdapter;
 pub use unification::{Confidence, Topic, UnificationGap};

@@ -91,6 +91,35 @@ impl Ladder {
         self.levels.first().cloned()
     }
 
+    /// Size standing at exactly `price`, or `None` if this side does not hold it.
+    ///
+    /// A lookup, not a walk: `None` means "no level at this price", which is a
+    /// different fact from `Some(Qty::ZERO)` — the latter cannot occur, because
+    /// [`Self::apply`] removes a level rather than storing a zero in it. Callers
+    /// that conflate the two turn "the venue never mentioned this price" into
+    /// "the venue says this price is empty".
+    pub fn qty_at(&self, price: Price) -> Option<Qty> {
+        match self.position(price) {
+            Ok(i) => self.levels.get(i).map(|l| l.qty),
+            Err(_) => None,
+        }
+    }
+
+    /// True when `price` is at least as good as `reference`, in this side's own
+    /// sense of "good".
+    ///
+    /// For bids, better means higher; for asks, lower. Exposed because code that
+    /// compares two prices on a ladder must not re-derive that rule with a bare
+    /// `<=` — the [`Self::position`] comment below is about the same inversion,
+    /// and getting it backwards there produced a book that quoted prices nobody
+    /// offered.
+    pub fn is_no_worse_than(&self, price: Price, reference: Price) -> bool {
+        match self.side {
+            Side::Buy => price >= reference,
+            Side::Sell => price <= reference,
+        }
+    }
+
     /// Apply one absolute-size level update.
     ///
     /// `qty == 0` deletes the level (and deleting a level we do not hold is a

@@ -28,6 +28,16 @@ publish.workspace = true
 #   report's formatting is not this crate's job, and the invariants worth pinning
 #   there are already pinned by arb-engine's own tests, which run the real
 #   fixtures through the real scanner.
+#
+#   arb-live: added in round 2. It is now the only crate in the workspace that can
+#   stamp `Provenance::LiveMeasured`, which means it is the only crate whose
+#   mistakes reach a number the operator is told is real. Its adapters also carry
+#   the per-venue *conventions* — funding interval units, which of three schedule
+#   stamps is the upcoming one, whether the ladder counts coins or contracts — and
+#   a convention read wrong is not a rounding error: it is a factor of 8, 1000 or
+#   100 in a number that still looks entirely plausible. `venues::*::captured`
+#   exports the real bytes precisely so a test above the crate can assert against
+#   them instead of inventing a payload, and `decisions/027` §6 says so.
 [dependencies]
 arb-num = { path = "../arb-num" }
 arb-types = { path = "../arb-types" }
@@ -35,4 +45,5 @@ arb-math = { path = "../arb-math" }
 arb-book = { path = "../arb-book" }
 arb-detect = { path = "../arb-detect" }
 arb-venue = { path = "../arb-venue" }
+arb-live = { path = "../arb-live" }
 arb-scan = { path = "../arb-scan" }

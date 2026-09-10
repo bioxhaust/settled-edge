@@ -64,4 +64,20 @@ pub use http::{
     DEFAULT_CONNECT_TIMEOUT_SECS, DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT_SECS,
 };
 pub use json::{Json, JsonError, MAX_DEPTH};
+
+// One re-export per venue, declared for all eight at once whether or not the
+// adapter behind it is finished. The point is that finishing one is a change to
+// exactly one file: `venues/<venue>.rs`. Nothing below moves when an adapter
+// lands, so eight people can work at once without meeting in this file.
+//
+// `arb-engine` reaches through the full path (`arb_live::venues::bybit::…`)
+// rather than these names, deliberately — a caller that says which venue it is
+// talking to in the path is easier to audit than one that says it in a type name.
+pub use venues::binance::BinanceAdapter;
+pub use venues::bitget::BitgetAdapter;
 pub use venues::bybit::BybitAdapter;
+pub use venues::gate::GateAdapter;
+pub use venues::htx::HtxAdapter;
+pub use venues::kucoin::KucoinAdapter;
+pub use venues::mexc::MexcAdapter;
+pub use venues::okx::OkxAdapter;

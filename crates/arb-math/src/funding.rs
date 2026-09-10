@@ -141,10 +141,29 @@ pub fn funding_payment(
 /// Returns [`MathError::NoBreakeven`] when the per-period receipt is zero or
 /// runs against us — there is no such count, and returning a large number would
 /// invite a caller to treat it as merely a long wait.
+///
+/// # Why a negative cost is refused, and refused *first*
+///
+/// A negative `round_trip_cost` used to fall into the same arm as zero and
+/// return `Ok(0)`: "breaks even at settlement zero", the single most flattering
+/// value this column can print, and a row sorted on it goes straight to the top.
+/// [`net_apr_over_horizon`] already refused exactly this input; the fence had
+/// been built in one sibling and not the other, which is the shape `OPEN.md` F4
+/// warns about — a fence verified by reading rather than by a test that
+/// enumerates the entry points. See `tests/rate_entry_points.rs`.
+///
+/// The check runs **before** the `NoBreakeven` check on purpose. A negative cost
+/// is a malformed input; `NoBreakeven` is a fact about the market. `arb-scan`
+/// maps `NoBreakeven` to `Ok(None)` and skips the row quietly, so ordering the
+/// checks the other way would let a malformed fee schedule be reported as
+/// "funding never pays this off" — a market conclusion drawn from a data defect.
 pub fn periods_to_breakeven(
     receipt_per_period: Rate,
     round_trip_cost: Bps,
 ) -> Result<u64, MathError> {
+    if round_trip_cost.is_negative() {
+        return Err(MathError::NegativeFeeRate);
+    }
     if !receipt_per_period.is_positive() {
         return Err(MathError::NoBreakeven);
     }
